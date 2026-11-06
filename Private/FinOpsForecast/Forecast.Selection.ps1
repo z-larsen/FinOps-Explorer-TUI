@@ -40,11 +40,16 @@ function Get-ForecastRunCoverage {
     # Full: the run covers the whole month. MonthToDate: it starts on the
     # first but ends early (a run in progress). Partial: it starts after the
     # first, so it can't stand in for the month. Unknown: a legacy file whose
-    # dates come only from its rows.
+    # rows reach the month's last day; its dates come only from those rows.
+    # A legacy file whose rows stop earlier counts as MonthToDate.
     param([Parameter(Mandatory)]$Result, [Parameter(Mandatory)][string]$Month)
-    if (-not $Result.Start) { return 'Unknown' }
-    $monthStart = Get-ForecastMonthStart -MonthKey $Month
     $lastDay = (Get-ForecastMonthEnd -MonthKey $Month).AddDays(-1)
+    if (-not $Result.Start) {
+        $stat = @($Result.MonthStats | Where-Object Month -EQ $Month)[0]
+        if ($stat -and $stat.Through -and ([datetime]$stat.Through).Date -lt $lastDay) { return 'MonthToDate' }
+        return 'Unknown'
+    }
+    $monthStart = Get-ForecastMonthStart -MonthKey $Month
     $runStart = ([datetime]$Result.Start).Date
     $runEnd = if ($Result.End) { ([datetime]$Result.End).Date } else { $runStart }
     if ($runStart -gt $monthStart) { return 'Partial' }
@@ -81,7 +86,7 @@ function Select-ForecastRuns {
         if ($result.Status -ne 'Unverified') { continue }
         $item = New-ForecastReviewItem -Key "run:${scopeKey}:$($result.RunKey)" -Fingerprint ([string]$result.Signature) -Category 'Run' -Reviews $Reviews -Subject ([string]$result.RunId) `
             -Title "Legacy export file without a manifest: $(ConvertTo-ForecastSafeText $result.RunId 120)" `
-            -Detail "Without a manifest the partition list and row counts can't be verified. Approve only if you've confirmed this file is the complete export for $(@($result.Months) -join ', ')." `
+            -Detail "Without a manifest the partition list and row counts can't be verified. Approve only if you've confirmed this file is the complete actual-cost export (not amortized) for $(@($result.Months) -join ', ')." `
             -Options @('Approved', 'Rejected') -Suggested 'Rejected'
         $reviewItems.Add($item)
         if ($item.Decision -eq 'Approved') { [void]$approved.Add([string]$result.RunKey) }
@@ -120,13 +125,21 @@ function Select-ForecastRuns {
         $eligible = @($byPreference | Where-Object { $_.Coverage -ne 'Partial' -and ($_.Run.Status -eq 'Complete' -or ($_.Run.Status -eq 'Unverified' -and $approved.Contains([string]$_.Run.RunKey))) })
         if ($eligible.Count -eq 0) {
             $statuses = (@($byPreference | ForEach-Object { "$($_.Run.Status)/$($_.Coverage)" } | Sort-Object -Unique) -join ', ')
-            $issues.Add((New-ForecastIssue -Code 'RUN-NOELIGIBLE' -Message "No complete, approved run covers $($group.Month) from its first day for $label (runs: $statuses)." -Subject $group.Month))
+            $reasons = @($byPreference | ForEach-Object { @($_.Run.Issues) } | Where-Object { $_ -and $_.Severity -eq 'Fail' } | ForEach-Object Message | Select-Object -Unique -First 2)
+            $issues.Add((New-ForecastIssue -Code 'RUN-NOELIGIBLE' -Message "No complete, approved run covers $($group.Month) from its first day for $label (runs: $statuses).$(if ($reasons.Count) { ' ' + ($reasons -join ' ') })" -Subject $group.Month))
             continue
         }
         $chosen = $eligible[0]
         $newestWhole = @($byPreference | Where-Object { $_.Coverage -ne 'Partial' -and $_.Coverage -eq $chosen.Coverage })[0]
         if ($newestWhole -and $newestWhole.Run.RunKey -ne $chosen.Run.RunKey) {
-            $issues.Add((New-ForecastIssue -Code 'RUN-NEWERINCOMPLETE' -Severity 'Warn' -Message "The newest run for $label in $($group.Month) is $($newestWhole.Run.Status); the earlier complete run $(ConvertTo-ForecastSafeText $chosen.Run.RunId 80) is used." -Subject $group.Month))
+            $reason = @(@($newestWhole.Run.Issues) | Where-Object { $_ -and $_.Severity -eq 'Fail' } | ForEach-Object Message | Select-Object -First 1)
+            $issues.Add((New-ForecastIssue -Code 'RUN-NEWERINCOMPLETE' -Severity 'Warn' -Message "The newest run for $label in $($group.Month) is $($newestWhole.Run.Status); the earlier complete run $(ConvertTo-ForecastSafeText $chosen.Run.RunId 80) is used.$(if ($reason.Count) { ' ' + $reason[0] })" -Subject $group.Month))
+        }
+        # Several loose files for one month are more likely different
+        # datasets or copies than reruns, so the choice is called out.
+        $otherLegacy = @($byPreference | Where-Object { -not $_.Run.HasManifest -and $_.Run.RunKey -ne $chosen.Run.RunKey })
+        if (-not $chosen.Run.HasManifest -and $otherLegacy.Count) {
+            $issues.Add((New-ForecastIssue -Code 'RUN-LEGACYMULTI' -Severity 'Warn' -Message "$($otherLegacy.Count + 1) files without a manifest cover $($group.Month) in the same folder; only $(ConvertTo-ForecastSafeText $chosen.Run.RunId 120) is used. Remove any file that isn't the actual-cost export for that month." -Subject $group.Month))
         }
         $monthEnd = Get-ForecastMonthEnd -MonthKey $group.Month
         $final = $chosen.Coverage -in 'Full', 'Unknown' -and $chosen.Run.Submitted -and ([datetime]$chosen.Run.Submitted) -ge $monthEnd.AddDays($grace)

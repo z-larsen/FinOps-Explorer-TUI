@@ -154,7 +154,7 @@ function Get-ForecastIngestProfile {
     # The tag value is captured in every mode, so switching workload modes
     # doesn't force a re-read; only a different tag key does.
     $values = [ordered]@{
-        version      = 4
+        version      = 5
         tagKey       = ([string]$Settings.workloads.tagKey).Trim()
         boundaryDate = [string]$Settings.migration.boundaryDate
     }

@@ -11,7 +11,7 @@ For the design, method details, and test coverage, see [forecast-design.md](fore
 ## What you need
 
 - PowerShell 7 and the same Az modules FinOps Explorer uses.
-- Cost Management exports of **actual cost** or **FOCUS** data in CSV format (gzip is fine). Amortized exports are rejected because they spread purchases instead of showing what was billed. Parquet isn't read.
+- Cost Management exports of **actual cost** or **FOCUS** data in CSV format (gzip is fine). Amortized exports are rejected because they spread purchases instead of showing what was billed; that includes an amortized file with no manifest, which is recognized from its content. Parquet isn't read.
 - At least **12 complete months** of history. The portal can backfill up to 13 months one month at a time; the [Exports Execute REST API](https://learn.microsoft.com/azure/cost-management-billing/costs/tutorial-improved-exports) goes back further. Set those up yourself; the forecast won't create them.
 - **Storage Blob Data Reader** on the storage account the exports deliver to. A local copy of the export container (same folder layout, for example from AzCopy) works too, with no Azure access at all.
 
@@ -61,13 +61,13 @@ The forecast doesn't guess when the data is ambiguous. It asks, records your ans
 
 | Exception | Your choice |
 |---|---|
-| Anomalous month-to-month change | Retain, Exclude from growth, or Step change (a new level that held). Check what happened first; actual charges always stay in actuals. |
+| Anomalous month-to-month change | Retain, Exclude from growth, or Step change (a new level that held). Check what happened first; actual charges always stay in actuals. A drop back to the trend right after a spike is suggested as Exclude, not Step change. |
 | Undefined change (previous month was zero or negative) | Acknowledge; it's left out of growth estimation. |
 | Anomalous latest month | Baseline from the latest month, the median of the last three, or a manual value with a reason. |
 | Unclassified publisher | Treat rows from non-Microsoft publishers as Marketplace or Microsoft. EA exports label every row `Azure`, so this comes up for EA. The decision covers the publisher names it lists; new rows from those publishers keep it, and a new publisher reopens it. |
 | Overlapping export scopes | Pick which export to keep when two carry the same subscription and month. Charges without a subscription, such as a shared savings plan purchase, follow the same choice by billing profile. |
 | Recurring purchase not scheduled | Add a scheduled item, or confirm it won't recur. |
-| Legacy export file without a manifest | Approve only if you've confirmed it's complete. |
+| Legacy export file without a manifest | Approve only if you've confirmed it's the complete actual-cost export for the month. It counts as a whole month only if its rows reach the month's last day. |
 | Positive refund rows, unknown charge types, boundary exclusions | Acknowledge after checking. |
 
 ## Scheduled items
@@ -90,6 +90,8 @@ For each workload you see:
 - Its share of the net change.
 - The month and amount of its largest month-over-month increase.
 - Flags for New, Retired, Moved, and Unmapped.
+
+When two workloads have the same display name, such as two subscriptions both called Pay-As-You-Go, a short ID is added in brackets so you can tell them apart.
 
 You can rank by change, spend, growth, or largest increase. Every workload is listed; nothing is cut off at a top-N.
 
@@ -127,6 +129,9 @@ It refreshes, writes reports, and saves a vintage if the forecast is Ready. If i
 - Cost data can change for up to 72 hours after a month ends. A month counts as final only when a whole-month run was submitted after the grace period (3 days by default).
 - A run that starts after the first of a month never replaces that month's whole-month run; it shows as CHECK on the Source line. A month covered only by a run still in progress stays provisional.
 - Rows dated outside a run's own start and end dates aren't counted. They show as CHECK on the Source line and as `ExcludedOutsideRange` in the reconciliation CSV.
+- A final month whose data ends before the month does shows as CHECK on the Source line, in case the export didn't cover the whole month.
+- Reconciliation ignores differences under 0.000001, which come from decimal rounding of very long amounts.
+- A first refresh reads about 10 MB of uncompressed CSV a second, roughly 10,000 real cost rows. Thirteen months at a million rows a month takes about 20 to 25 minutes the first time; later refreshes only read new runs.
 - Windows is the verified platform. The code is cross-platform, but Linux and macOS haven't been tested.
 
 ## Tests

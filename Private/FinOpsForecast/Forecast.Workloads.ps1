@@ -227,6 +227,16 @@ function Get-ForecastWorkloadAnalysis {
                 Notes = ($notes -join ' '); MonthlyRunRate = $rates
             })
     }
+    # Different workloads can share a display name, such as two subscriptions
+    # both named Pay-As-You-Go. A short ID keeps them apart on screen; the
+    # stable WorkloadId is unchanged.
+    foreach ($group in @($results | Group-Object { ([string]$_.WorkloadName).ToLowerInvariant() } | Where-Object Count -GT 1)) {
+        foreach ($result in $group.Group) {
+            $guid = [regex]::Match([string]$result.WorkloadId, '[0-9a-fA-F]{8}(?=-[0-9a-fA-F]{4}-)')
+            $short = if ($guid.Success) { $guid.Value.ToLowerInvariant() } else { Get-ForecastHash -Text ([string]$result.WorkloadId) -Length 8 }
+            $result.WorkloadName = "$($result.WorkloadName) [$short]"
+        }
+    }
     $netChange = 0d
     foreach ($result in $results) { $netChange += [decimal]$result.Change }
     foreach ($result in $results) { $result.ContributionShare = if ([math]::Abs($netChange) -ge 0.01d) { [decimal]$result.Change / $netChange } else { $null } }

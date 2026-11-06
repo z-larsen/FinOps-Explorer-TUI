@@ -101,7 +101,19 @@ Describe 'Forecast engine' {
             $spikeIn = @($model.Comparisons.Items | Where-Object ToMonth -EQ '2026-03')[0]
             $spikeIn.Flagged | Should -BeTrue
             $spikeIn.Suggestion | Should -Be 'Exclude'
+            # The drop back holds the following month, but it undoes the spike,
+            # so it isn't suggested as a step change.
+            $spikeOut = @($model.Comparisons.Items | Where-Object ToMonth -EQ '2026-04')[0]
+            $spikeOut.Flagged | Should -BeTrue
+            $spikeOut.Suggestion | Should -Be 'Exclude'
+            $spikeOut.Review.Detail | Should -Match 'reverses the flagged change from 2026-02 to 2026-03'
             ($model.Window.Rows | Where-Object Month -EQ '2026-03').Headline | Should -BeGreaterThan 2900
+        }
+
+        It 'Still suggests a step change when a drop after a spike settles at a new level' {
+            $rates = [decimal[]](1000, 1010, 1020, 1030, 3000, 600, 606, 612, 618, 624, 630, 636)
+            $model = Invoke-TestModel -Dataset (New-TestDataset -Values (New-RateSeries $rates)) -Settings (New-TestSettings)
+            @($model.Comparisons.Items | Where-Object ToMonth -EQ '2026-04')[0].Suggestion | Should -Be 'StepChange'
         }
 
         It 'Reopens a review when the underlying data changes' {

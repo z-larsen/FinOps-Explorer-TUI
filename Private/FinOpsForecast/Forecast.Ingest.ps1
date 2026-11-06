@@ -365,11 +365,25 @@ function Invoke-ForecastRunIngest {
     if ($outsideRows -gt 0) {
         $issues.Add((New-ForecastIssue -Code 'RUN-OUTSIDE' -Severity 'Warn' -Message "$outsideRows row(s) totaling $(Format-ForecastAmount $outsideTotal) fall outside the run's declared dates and weren't counted."))
     }
+    # Actual cost shows usage covered by a reservation or savings plan at zero
+    # and never has unused-benefit rows; amortized cost has both. EA and MCA
+    # amortized files share the actual-cost columns, so the content decides.
+    # FOCUS is read through BilledCost, which is already the billed amount.
+    $amortizedRows = 0L; $amortizedTotal = [decimal]0
+    if ($kind -and $kind -ne 'FOCUS') {
+        foreach ($cell in $cells.Values) {
+            $coveredWithCost = $cell.ChargeType -eq 'Usage' -and $cell.PricingModel -in 'Reservation', 'SavingsPlan' -and $cell.Cost -ne 0
+            if ($coveredWithCost -or $cell.ChargeType -in 'UnusedReservation', 'UnusedSavingsPlan') { $amortizedRows += [long]$cell.Rows; $amortizedTotal += [decimal]$cell.Cost }
+        }
+    }
+    if ($amortizedRows -gt 0) {
+        $issues.Add((New-ForecastIssue -Code 'RUN-AMORTIZED' -Message "This file looks like amortized cost: $amortizedRows row(s) totaling $(Format-ForecastAmount $amortizedTotal) are unused-benefit charges or reservation and savings plan usage with a cost, which actual cost shows at zero. Use an ActualCost or FocusCost export. The run isn't used."))
+    }
     $result.Schema = $kind
     $result.OutsideRows = $outsideRows
     $result.OutsideTotal = $outsideTotal
     $result.Parts = $partResults.ToArray()
-    $result.Status = if ($incomplete) { 'Incomplete' } elseif ($invalidTotal -gt 0) { 'Invalid' } elseif (-not $Run.HasManifest) { 'Unverified' } else { 'Complete' }
+    $result.Status = if ($incomplete) { 'Incomplete' } elseif ($invalidTotal -gt 0 -or $amortizedRows -gt 0) { 'Invalid' } elseif (-not $Run.HasManifest) { 'Unverified' } else { 'Complete' }
     $result.MonthStats = @(foreach ($entry in $monthStats.GetEnumerator()) {
             [pscustomobject]@{
                 Month = $entry.Key; Rows = $entry.Value.Rows; Total = $entry.Value.Total

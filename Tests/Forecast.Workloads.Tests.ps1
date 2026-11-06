@@ -33,10 +33,10 @@ BeforeAll {
     }
 
     function Invoke-TestWorkloads {
-        param([object[]]$Cells, [string]$Mode = 'Tag', [object[]]$Rules = @(), [string[]]$Months = $script:Months)
+        param([object[]]$Cells, [string]$Mode = 'Tag', [object[]]$Rules = @(), [string[]]$Months = $script:Months, [hashtable]$Names = @{ $script:SyntheticSubscriptions.A = 'sub-synth-a'; $script:SyntheticSubscriptions.B = 'sub-synth-b' })
         $settings = New-TestSettings
         $settings.workloads.mode = $Mode
-        InModuleScope FinOpsForecast -Parameters @{ Cells = $Cells; Settings = $settings; Rules = $Rules; Months = $Months; Names = @{ $script:SyntheticSubscriptions.A = 'sub-synth-a'; $script:SyntheticSubscriptions.B = 'sub-synth-b' } } {
+        InModuleScope FinOpsForecast -Parameters @{ Cells = $Cells; Settings = $settings; Rules = $Rules; Months = $Months; Names = $Names } {
             Get-ForecastWorkloadAnalysis -Cells $Cells -Months $Months -Settings $Settings -Rules $Rules -SubscriptionNames $Names
         }
     }
@@ -61,6 +61,16 @@ Describe 'Workload analysis' {
                 $unmapped.Flags | Should -Match 'Unmapped'
                 $unmapped.WorkloadName | Should -Be 'Unmapped (sub-synth-a)'
             }
+        }
+
+        It 'Adds a short ID when different workloads share a display name' {
+            $flat = [decimal[]]@(1..12 | ForEach-Object { 1000 })
+            $cells = @(New-RateCells -Rates $flat -Subscription 'A') + @(New-RateCells -Rates $flat -Subscription 'B') + @(New-RateCells -Rates $flat -Subscription 'C')
+            $names = @{ $script:SyntheticSubscriptions.A = 'Pay-As-You-Go'; $script:SyntheticSubscriptions.B = 'pay-as-you-go'; $script:SyntheticSubscriptions.C = 'sub-synth-c' }
+            $analysis = Invoke-TestWorkloads -Cells $cells -Mode 'Subscription' -Names $names
+            (Get-Workload $analysis $script:SyntheticSubscriptions.A).WorkloadName | Should -Be 'Pay-As-You-Go [11111111]'
+            (Get-Workload $analysis $script:SyntheticSubscriptions.B).WorkloadName | Should -Be 'pay-as-you-go [22222222]'
+            (Get-Workload $analysis $script:SyntheticSubscriptions.C).WorkloadName | Should -Be 'sub-synth-c'
         }
 
         It 'Applies a mapping file with stable IDs, merges, and display names' {

@@ -44,18 +44,18 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
 ## Data flow
 
 1. **Discover runs.** List every blob under each source. Each `manifest.json` describes one run: `runId`, `submittedTime`, `startDate`, `endDate`, `exportConfig.resourceId` and `type`, and every partition with `byteCount` and `dataRowCount`. CSV files that no manifest claims become legacy runs, which need a reviewer's approval.
-2. **Read runs.** Download every declared partition and check its byte count. Stream it through `TextFieldParser`, then check its row count. Any missing partition, size or row mismatch, or unreadable row makes the run unusable instead of quietly short.
+2. **Read runs.** Download every declared partition and check its byte count. Stream it through `TextFieldParser`, then check its row count. Any missing partition, size or row mismatch, or unreadable row makes the run unusable instead of quietly short. So does amortized content: EA and MCA amortized files have the same columns as actual cost, so a run is rejected when reservation- or savings-plan-covered usage has a cost, or when it has unused-benefit charges. Actual cost has neither.
 3. **Reduce, then classify.** The C# reducer sums rows that share the same raw values into tuples. A PowerShell reducer with identical output covers hosts that block `Add-Type`. PowerShell then applies the rules once per tuple: schema, charge stream, publisher class, pricing model, agreement, migration-boundary side, and workload tag.
 4. **Cache.** Results are cached per run. A refresh re-reads only runs whose manifest, partitions, or ingest profile (tag key, boundary date) changed. A new cache replaces the old one only after every source was read.
-5. **Select.** For each (original scope, dataset, month), prefer a run that covers the whole month, then a legacy run, then one still in progress; among those, the latest complete, approved run wins. A run that starts after the first of the month can't stand in for it and raises a warning. A month counts as final once a whole-month run was submitted at least the grace period after month end. A corrected rerun replaces the month instead of adding to it.
-6. **Assemble.** Apply overlap, boundary, scope, and filter rules, then reconcile every run-month to its raw total. Overlap is decided per subscription, or per billing profile for charges without a subscription. Rows dated outside a run's own dates are reported, not counted.
+5. **Select.** For each (original scope, dataset, month), prefer a run that covers the whole month, then a legacy run, then one still in progress; among those, the latest complete, approved run wins. A run that starts after the first of the month can't stand in for it and raises a warning. A legacy file only counts as covering the whole month if its rows reach the month's last day; otherwise it's treated as still in progress. A month counts as final once a whole-month run was submitted at least the grace period after month end. A corrected rerun replaces the month instead of adding to it. Several legacy files for one month raise a warning, because they're more likely different datasets than reruns.
+6. **Assemble.** Apply overlap, boundary, scope, and filter rules, then reconcile every run-month to its raw total. Overlap is decided per subscription, or per billing profile for charges without a subscription. Rows dated outside a run's own dates are reported, not counted. A final month whose data ends before the month does raises a warning.
 7. **Model, gate, report.** Run the forecast and the readiness checks, then write reports. Save a vintage only when the forecast is Ready.
 
 ### Charge streams
 
 | Stream | Charge types | Treatment |
 |---|---|---|
-| Run rate | Usage, UnusedReservation, UnusedSavingsPlan | Drives growth |
+| Run rate | Usage | Drives growth. UnusedReservation and UnusedSavingsPlan exist only in amortized cost, so a file that has them is rejected |
 | Purchase | Purchase, Refund | Kept in actuals; future amounts come only from scheduled items |
 | Adjustment | RoundingAdjustment, Adjustment | Kept in actuals; not grown |
 | Credit | Credit | Never in the pre-credit headline |
@@ -66,7 +66,7 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
 
 - **Run rate:** month cost × 30 / days in month.
 - **Comparisons:** N complete months give N − 1 adjacent changes, ordered by month key, never by row order. A zero or negative previous month makes the change undefined, and it needs an acknowledgement.
-- **Anomalies:** a change is flagged when |change − median| > max(K × 1.4826 × MAD, minimum deviation). The defaults are K = 3 and 5 points. A flag needs a review: Retain, Exclude, or Step change. Step change is suggested when the new level held the following month.
+- **Anomalies:** a change is flagged when |change − median| > max(K × 1.4826 × MAD, minimum deviation). The defaults are K = 3 and 5 points. A flag needs a review: Retain, Exclude, or Step change. Step change is suggested when the new level held the following month, unless the change reverses a flagged change just before it and brings the run rate back near its trend; that's a one-off spike or dip, so Exclude is suggested.
 - **Growth:** the median of retained changes. The sensitivity range is the 25th to 75th percentile (PERCENTILE.INC). At least 8 of 11 must be retained.
 - **Baseline:** the latest month's run rate. If that month is anomalous, a separate review picks the latest month, the median of the last three months, or a manual value with a reason.
 - **Projection:** baseline × (1 + g)^h × days / 30 for each path, where h is months after the window.
@@ -75,7 +75,7 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
 - **Fiscal-year totals:** sum one consistent path per scenario, never independent percentiles.
 - **Backtest:** every cutoff with a full window and a later month, using automatic exclusions. It reports mean absolute error, bias, and how often actuals fell in range. These are observed results, not a calibration.
 
-Money is `[decimal]` throughout and stored as invariant strings in JSON. Display rounding is banker's rounding to cents.
+Money is `[decimal]` throughout and stored as invariant strings in JSON. Display rounding is banker's rounding to cents. Reconciliation treats differences under 0.000001 as rounding: `[decimal]` keeps 28 to 29 significant digits, so very long amounts summed in a different order can differ in the last digit.
 
 ## Readiness gate
 
@@ -108,6 +108,7 @@ Checked on Microsoft Learn, November 2026.
 | Taxes and credits aren't in any Cost Management cost dataset | [FOCUS conformance](https://learn.microsoft.com/cloud-computing/finops/focus/conformance-full-report) |
 | `PublisherType` is documented as `Azure` for every EA row | EA schema |
 | Actual cost shows reservation purchases as Purchase charges and covered usage at zero | [Amortized costs](https://learn.microsoft.com/azure/cost-management-billing/reservations/view-amortized-costs) |
+| Unused reservation and savings plan charges appear only in amortized cost; actual cost has a zero effective price for savings-plan-covered usage, and amortized cost has no purchase rows | [Amortized costs](https://learn.microsoft.com/azure/cost-management-billing/reservations/view-amortized-costs), [Savings plan cost and usage](https://learn.microsoft.com/azure/cost-management-billing/savings-plan/utilization-cost-reports) |
 | FOCUS `BilledCost` is the invoicing basis; `x_PublisherCategory` separates vendors from the cloud provider | [FOCUS schema](https://learn.microsoft.com/azure/cost-management-billing/dataset-schema/cost-usage-details-focus) |
 | EA cost history stays in the EA scope after moving to MCA | [Onboard MCA](https://learn.microsoft.com/azure/cost-management-billing/manage/onboard-microsoft-customer-agreement) |
 | A billing period closes up to 72 hours after it ends; export files aren't rounded | [Understand Cost Management data](https://learn.microsoft.com/azure/cost-management-billing/costs/understand-cost-mgt-data) |
@@ -145,23 +146,43 @@ Validating these against sanitized real exports is the main open task.
 | Review decisions stay stable | Exports: a publisher decision survives new rows from the same publisher and reopens for a new one |
 | Nothing dropped silently | Exports: rows outside a run's dates are reported, reconciled, and warn on Source; the cache keeps their total exactly |
 | Scheduled items in the current month | Engine: a purchase already posted isn't added again; an unlinked purchase item gets a note |
+| Month coverage from the data | Exports: a loose file whose rows stop mid-month stays provisional; a final month whose data ends early warns |
+| Amortized data rejected | Exports: EA covered usage with a cost and an MCA unused-reservation row are rejected with the reason shown; an actual-cost file wins over an amortized copy beside it |
+| Rounding isn't a reconciliation failure | Exports: differences under 0.000001 pass, larger ones fail |
+| One-off spikes | Engine: the drop back after a spike is suggested as Exclude; a drop that settles at a new level is still a step change |
+| Display names | Workloads: subscriptions with the same name get a short ID |
+
+## Checked against the FinOps toolkit sample
+
+The forecast was also run against the Microsoft sample cost data in the FinOps toolkit repository (`src/open-data/dataset-examples`, a demo EA billing account). The sample covers June 1 to 19, 2024 only, so it can't produce a Ready forecast by itself.
+
+- **EA actual cost** (135,253 rows, 55 columns): $35,445.86, which is $35,425.22 of usage plus a $20.64 reservation purchase. That matches an independent count of the file, with nothing unreconciled.
+- **FOCUS 1.0** (96 columns, read through `BilledCost`): the same totals to the cent.
+- **EA amortized cost** placed beside the actual-cost file: rejected as amortized.
+- **A 12-month replay** of the June rows with a scripted growth pattern (2.6 million rows): the growth, anomaly flags, workload metrics, and fiscal-year totals came out as constructed.
+
+This run found the issues covered by the last five rows of the table above.
 
 ## Performance
 
-These figures were measured on Windows with PowerShell 7.6 and synthetic gzip CSV exports:
+These figures were measured on Windows with PowerShell 7.6, one refresh at a time, using the compiled reducer. The synthetic rows time reading only; the sample rows time the whole `Start-FinOpsForecast -NonInteractive` run (read, evaluate, write reports).
 
-| Rows in one partition | Compiled reducer | PowerShell reducer |
+| Data | Size | Time |
 |---|---|---|
-| 200,000 | 9.6 s (includes the one-time compile) | 68 s |
-| 1,000,000 | 19 s | not measured |
+| Synthetic, narrow rows, 1 partition | 200,000 rows | 9.6 s (includes the one-time compile) |
+| Synthetic, narrow rows, 1 partition | 1,000,000 rows | 19 s |
+| FinOps toolkit EA sample, 55 columns | 135,253 rows, 135 MB | 23 s |
+| FinOps toolkit FOCUS 1.0 sample, 96 columns | 135,253 rows, 195 MB | 27 s |
+| 13 monthly gzip runs of the EA sample rows | 2.6 million rows, about 2.7 GB uncompressed | 250 s |
 
-The PowerShell reducer only runs when the host blocks `Add-Type`, for example in Constrained Language Mode.
+Real cost rows are wide, so throughput depends on bytes more than rows: about 10 MB of uncompressed CSV a second, or roughly 10,000 real rows a second. A first refresh of 13 months at a million rows a month therefore takes about 20 to 25 minutes. Later refreshes only read new or corrected runs. Partitions are held in memory compressed, so gzip exports keep memory low.
 
-A first refresh of 13 months at a million rows a month takes a few minutes. Later refreshes only read new or corrected runs. Partitions are held in memory compressed, so gzip exports keep memory low.
+The PowerShell reducer only runs when the host blocks `Add-Type`, for example in Constrained Language Mode. It took 68 s for 200,000 narrow synthetic rows, about seven times slower than the compiled reducer.
 
 ## Follow-ups
 
 - Validate the unknowns above with sanitized EA and MCA exports.
 - Run the suite on Linux and macOS.
+- Faster CSV parsing for wide rows; `TextFieldParser` is the main cost of a first refresh.
 - Optional sources: a FinOps hub (Kusto `Costs()` with `BilledCost`) and Parquet exports.
 - If the Toolkit wants this feature, move it upstream as its own PR after #2155 merges.

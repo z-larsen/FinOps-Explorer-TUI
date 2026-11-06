@@ -51,7 +51,7 @@ function Get-ForecastDisclosure {
     $lines.Add('')
     $lines.Add('LOOKBACK AND COMPARISONS')
     $lines.Add("- Window: $($window.First) to $($window.Last) ($(@($window.Rows).Count) months). The latest month eligible as final is $($window.LastEligible) (grace $($Settings.period.graceDays) days after month end).")
-    $lines.Add('- Each month is normalized to a 30-day run rate: cost / days in month x 30, using Usage, UnusedReservation, and UnusedSavingsPlan charges.')
+    $lines.Add('- Each month is normalized to a 30-day run rate: cost / days in month x 30, using Usage charges. Unused reservation and savings plan charges appear only in amortized cost, which isn''t accepted.')
     $lines.Add("- $($comparisons.Expected) adjacent-month comparisons; $(@($comparisons.Items | Where-Object Retained).Count) retained, $(@($comparisons.Items | Where-Object Status -EQ 'Undefined').Count) undefined, $(@($comparisons.Items | Where-Object Flagged).Count) flagged.")
     $lines.Add("- Flag rule: |change - median| > max($(Format-ForecastDecimal $comparisons.K) x scaled MAD, $(Format-ForecastPercent $comparisons.MinimumDeviation)). Median $(Format-ForecastPercent $comparisons.Median); threshold $(Format-ForecastPercent $comparisons.Threshold).")
     foreach ($item in @($comparisons.Items | Where-Object { $_.Status -ne 'Defined' -or $_.Flagged })) {

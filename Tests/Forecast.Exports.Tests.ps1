@@ -253,6 +253,84 @@ Describe 'Export history' {
             $approved = Invoke-TestHistory -Settings $settings -Reviews (New-Review $review 'Approved')
             (Get-TestMonth $approved '2026-09').RunRate | Should -Be 12
         }
+
+        It 'Treats a loose file whose rows end on <LastDate> as <Status>' -ForEach @(
+            @{ LastDate = '06/19/2026'; Status = 'Provisional'; Coverage = 'MonthToDate' }
+            @{ LastDate = '06/30/2026'; Status = 'Complete'; Coverage = 'Unknown' }
+        ) {
+            $root = New-TestRoot
+            $null = New-Item -ItemType Directory -Path (Join-Path $root 'loose')
+            $csv = ConvertTo-SyntheticCsv -Kind 'EA' -Rows @(New-SyntheticRow -Date '06/01/2026' -Cost '40'; New-SyntheticRow -Date $LastDate -Cost '2')
+            [IO.File]::WriteAllText((Join-Path $root 'loose\ea-actual.csv'), $csv)
+            $settings = New-TestSettings -Root $root
+            $review = @((Invoke-TestHistory -Settings $settings).Dataset.Reviews | Where-Object Category -EQ 'Run')[0]
+            $review.Detail | Should -Match 'actual-cost export \(not amortized\)'
+            $history = Invoke-TestHistory -Settings $settings -Reviews (New-Review $review 'Approved')
+            $history.Selection.Selection[0].Coverage | Should -Be $Coverage
+            $june = Get-TestMonth $history '2026-06'
+            $june.Status | Should -Be $Status
+            $june.Headline | Should -Be 42
+        }
+
+        It 'Warns when a final month''s data ends before the month does' {
+            $root = New-TestRoot
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -Month '2026-09' -Parts @(, @(New-SyntheticRow -Date '09/01/2026' -Cost '5'; New-SyntheticRow -Date '09/19/2026' -Cost '5'))
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root)
+            $september = Get-TestMonth $history '2026-09'
+            $september.Status | Should -Be 'Complete'
+            $september.Note | Should -Match 'Data ends 11 day\(s\) before month end'
+            @($history.Dataset.Issues | Where-Object { $_.Code -eq 'RUN-EARLYEND' -and $_.Severity -eq 'Warn' -and $_.Subject -eq '2026-09' }).Count | Should -Be 1
+        }
+
+        It 'Rejects amortized cost in an actual-cost <Kind> file (<Case>)' -ForEach @(
+            @{ Kind = 'EA'; Case = 'covered usage with a cost'; Row = @{ Date = '10/02/2026'; Cost = '7'; PricingModel = 'Reservation'; CommitmentId = 'ri-1' } }
+            @{ Kind = 'MCA'; Case = 'an unused reservation charge'; Row = @{ Date = '10/02/2026'; Cost = '3'; ChargeType = 'UnusedReservation'; PricingModel = 'Reservation'; CommitmentId = 'ri-1' } }
+        ) {
+            $root = New-TestRoot
+            $null = New-SyntheticExportRun -Root $root -Kind $Kind -Month '2026-10' -Parts @(, @(New-SyntheticRow -Date '10/01/2026' -Cost '100'; New-SyntheticRow @Row))
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root)
+            $history.Results[0].Status | Should -Be 'Invalid'
+            @($history.Results[0].Issues | Where-Object Code -EQ 'RUN-AMORTIZED').Count | Should -Be 1
+            @($history.Dataset.Issues | Where-Object Code -EQ 'RUN-NOELIGIBLE')[0].Message | Should -Match 'looks like amortized cost'
+            $history.Dataset.Months.Count | Should -Be 0
+        }
+
+        It 'Uses the actual-cost file when an amortized copy sits beside it' {
+            $root = New-TestRoot
+            $folder = Join-Path $root 'loose'
+            $null = New-Item -ItemType Directory -Path $folder
+            $actual = @(
+                New-SyntheticRow -Date '06/01/2026' -Cost '100'
+                New-SyntheticRow -Date '06/30/2026' -Cost '0' -PricingModel 'Reservation' -CommitmentId 'ri-1'
+                New-SyntheticRow -Date '06/10/2026' -Cost '30' -ChargeType 'Purchase' -CommitmentId 'ri-1'
+            )
+            $amortized = @(
+                New-SyntheticRow -Date '06/01/2026' -Cost '100'
+                New-SyntheticRow -Date '06/30/2026' -Cost '1' -PricingModel 'Reservation' -CommitmentId 'ri-1'
+            )
+            [IO.File]::WriteAllText((Join-Path $folder 'ea-actual.csv'), (ConvertTo-SyntheticCsv -Kind 'EA' -Rows $actual))
+            [IO.File]::WriteAllText((Join-Path $folder 'ea-amortized.csv'), (ConvertTo-SyntheticCsv -Kind 'EA' -Rows $amortized))
+            (Get-Item (Join-Path $folder 'ea-amortized.csv')).LastWriteTimeUtc = [datetime]::UtcNow.AddHours(1)
+            $settings = New-TestSettings -Root $root
+            $reviews = @{}
+            foreach ($item in @((Invoke-TestHistory -Settings $settings).Dataset.Reviews | Where-Object Category -EQ 'Run')) { $reviews += New-Review $item 'Approved' }
+            $reviews.Count | Should -Be 1
+            $history = Invoke-TestHistory -Settings $settings -Reviews $reviews
+            $history.Selection.Selection[0].RunId | Should -Be 'legacy:loose/ea-actual.csv'
+            (Get-TestMonth $history '2026-06').Headline | Should -Be 130
+            @($history.Dataset.Issues | Where-Object Code -EQ 'RUN-LEGACYMULTI').Count | Should -Be 1
+            @($history.Dataset.Issues | Where-Object Code -EQ 'RUN-NEWERINCOMPLETE')[0].Message | Should -Match 'looks like amortized cost'
+        }
+
+        It 'Treats only differences of at least a millionth as unreconciled' {
+            InModuleScope FinOpsForecast {
+                Test-ForecastMaterialDifference ([decimal]'0.000000000000000000000076') | Should -BeFalse
+                Test-ForecastMaterialDifference ([decimal]'0.000000999') | Should -BeFalse
+                Test-ForecastMaterialDifference ([decimal]'0.000001') | Should -BeTrue
+                Test-ForecastMaterialDifference ([decimal]'-0.5') | Should -BeTrue
+                Test-ForecastMaterialDifference $null | Should -BeFalse
+            }
+        }
     }
 
     Context 'Filters, scope, and reconciliation' {

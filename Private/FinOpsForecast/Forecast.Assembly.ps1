@@ -295,6 +295,12 @@ function Merge-ForecastExportHistory {
                             -Options @('Acknowledged') -Suggested 'Acknowledged'))
             }
         }
+        $lastDay = (Get-ForecastMonthEnd -MonthKey $month).AddDays(-1)
+        if ($status -eq 'Complete' -and $through -and ([datetime]$through).Date -lt $lastDay) {
+            $gap = [int]($lastDay - ([datetime]$through).Date).TotalDays
+            $notes.Add("Data ends $gap day(s) before month end.")
+            $issues.Add((New-ForecastIssue -Code 'RUN-EARLYEND' -Severity 'Warn' -Message "$month is final, but its data ends on $(([datetime]$through).ToString('yyyy-MM-dd', $script:ForecastInvariant)), $gap day(s) before month end. Check the export covers the whole month." -Subject $month))
+        }
         $runRate = $totals.RunRate
         $rows.Add([pscustomobject]@{
                 Month = $month; Status = $status; Days = Get-ForecastDaysInMonth -MonthKey $month
@@ -308,7 +314,10 @@ function Merge-ForecastExportHistory {
     }
     if ($currencies.Count -gt 1) { $issues.Add((New-ForecastIssue -Code 'CUR-MIXED' -Message "The history mixes billing currencies ($(@($currencies) -join ', ')). Amounts in different currencies can't be added together; scope the forecast to one currency.")) }
     foreach ($row in $reconciliation) {
-        if ($row.Difference -ne 0) { $issues.Add((New-ForecastIssue -Code 'REC-DIFF' -Message "$($row.Month) $($row.Source) doesn't reconcile: $(Format-ForecastAmount $row.Difference) is unaccounted for." -Subject $row.Month)) }
+        if (Test-ForecastMaterialDifference $row.Difference) {
+            $shown = if ([math]::Abs([decimal]$row.Difference) -ge 0.01d) { Format-ForecastAmount $row.Difference } else { ([decimal]$row.Difference).ToString('G', $script:ForecastInvariant) }
+            $issues.Add((New-ForecastIssue -Code 'REC-DIFF' -Message "$($row.Month) $($row.Source) doesn't reconcile: $shown is unaccounted for." -Subject $row.Month))
+        }
     }
 
     # Recurring purchases that no scheduled item covers would be missing from

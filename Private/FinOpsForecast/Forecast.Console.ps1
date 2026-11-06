@@ -212,7 +212,7 @@ function Show-ForecastReconciliation {
         foreach ($row in @($rows | Select-Object -Skip ($page * $size) -First $size)) {
             $excluded = 0d
             foreach ($name in 'ExcludedTax', 'ExcludedMarketplace', 'ExcludedUnattributed', 'ExcludedBoundary', 'ExcludedScope', 'ExcludedOverlap') { if ($null -ne $row.$name) { $excluded += [decimal]$row.$name } }
-            $color = if ($null -ne $row.Difference -and [decimal]$row.Difference -ne 0) { 'Red' } else { 'Gray' }
+            $color = if (Test-ForecastMaterialDifference $row.Difference) { 'Red' } else { 'Gray' }
             Write-FinOpsConsole ('  {0,-8} {1,16} {2,16} {3,14} {4,14} {5,12}  {6}' -f $row.Month, (Format-ForecastAmount $row.RawTotal), (Format-ForecastAmount $row.IncludedHeadline), (Format-ForecastAmount $excluded), (Format-ForecastAmount $row.Credits), (Format-ForecastAmount $row.Difference), (ConvertTo-ForecastSafeText $row.Source 40)) -ForegroundColor $color
         }
         $pages = [math]::Max(1, [math]::Ceiling($rows.Count / $size))

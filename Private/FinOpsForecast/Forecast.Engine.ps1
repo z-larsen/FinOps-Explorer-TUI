@@ -11,7 +11,7 @@ param()
 ###########################################################################
 # Method (all amounts pre-credit, in the billing currency):
 #  1. Run rate R = month cost / days in month x 30, using run-rate charges
-#     (Usage, UnusedReservation, UnusedSavingsPlan).
+#     (Usage; unused-benefit charges exist only in amortized cost).
 #  2. The lookback (12+ complete months, ordered by month key) gives N-1
 #     adjacent comparisons g = R(m) / R(m-1) - 1. A zero or negative prior
 #     run rate makes g undefined; a reviewer must acknowledge it.
@@ -161,8 +161,19 @@ function Get-ForecastComparisons {
                     $comparison.Flagged = $true
                     $next = if ($i + 1 -lt $comparisons.Count) { $comparisons[$i + 1] } else { $null }
                     $persisted = $next -and $next.Status -eq 'Defined' -and [math]::Abs([decimal]$next.Change - $median) -le $threshold
-                    $comparison.Suggestion = if ($persisted) { 'StepChange' } else { 'Exclude' }
-                    $why = if ($persisted) { 'The new level held the following month, which suggests sustained growth or a step change.' } else { 'The change didn''t persist into the next month, or it''s the latest comparison.' }
+                    # A move back to the trend right after a flagged move the other
+                    # way undoes a one-off spike or dip; it isn't a new level.
+                    $previous = if ($i -gt 0) { $comparisons[$i - 1] } else { $null }
+                    $reverses = $false
+                    if ($previous -and $previous.Flagged -and $previous.Status -eq 'Defined' -and [math]::Sign($previous.Deviation) -ne [math]::Sign($comparison.Deviation) -and [decimal]$previous.FromRunRate -gt 0) {
+                        $twoStep = ([decimal]$comparison.ToRunRate / [decimal]$previous.FromRunRate) - 1d
+                        $expected = (1d + $median) * (1d + $median) - 1d
+                        $reverses = [math]::Abs($twoStep - $expected) -le $threshold
+                    }
+                    $comparison.Suggestion = if ($reverses) { 'Exclude' } elseif ($persisted) { 'StepChange' } else { 'Exclude' }
+                    $why = if ($reverses) { "It reverses the flagged change from $($previous.FromMonth) to $($previous.ToMonth): the run rate is back near its earlier trend, which points to a one-off spike or dip rather than a new level." }
+                    elseif ($persisted) { 'The new level held the following month, which suggests sustained growth or a step change.' }
+                    else { 'The change didn''t persist into the next month, or it''s the latest comparison.' }
                     $comparison.Review = New-ForecastReviewItem -Key $key -Fingerprint $fingerprint -Category 'Anomaly' -Reviews $Reviews -Subject $comparison.ToMonth `
                         -Title "Anomalous change $($comparison.FromMonth) to $($comparison.ToMonth): $(Format-ForecastPercent $comparison.Change)" `
                         -Detail "Median change is $(Format-ForecastPercent $median); the flag threshold is +/- $(Format-ForecastPercent $threshold). $why Investigate before excluding. Actual charges stay in actuals either way." `

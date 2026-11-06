@@ -39,6 +39,16 @@ function New-ForecastIssue {
     [pscustomobject]@{ Code = $Code; Severity = $Severity; Message = $Message; Subject = $Subject }
 }
 
+# Reconciliation differences below a millionth of a currency unit are decimal
+# rounding: [decimal] keeps 28-29 significant digits, so sums of long amounts
+# in a different order can differ in the last digit.
+$script:ForecastReconcileTolerance = [decimal]0.000001
+
+function Test-ForecastMaterialDifference {
+    param([AllowNull()]$Value)
+    return $null -ne $Value -and [math]::Abs([decimal]$Value) -ge $script:ForecastReconcileTolerance
+}
+
 # -- Decimal parsing and formatting ---------------------------------------
 # Returns $null for blank or invalid text so callers decide whether a blank
 # means "missing" (manual inputs) or "invalid row" (exports).
