@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "dataMode": "Exports",
+  "scope": {
+    "kind": "Subscriptions",
+    "subscriptionIds": [
+      "00000000-0000-0000-0000-000000000001",
+      "00000000-0000-0000-0000-000000000002"
+    ],
+    "billingProfileId": "",
+    "label": "Contoso production (synthetic)"
+  },
+  "period": {
+    "fiscalYearStartMonth": 7,
+    "fiscalYearOffset": 0,
+    "lookbackMonths": 12,
+    "graceDays": 3,
+    "staleAfterDays": 35,
+    "windowEnd": "Auto"
+  },
+  "filters": {
+    "includeMarketplace": false,
+    "includeTax": false
+  },
+  "method": {
+    "central": "Median",
+    "lowPercentile": 25,
+    "highPercentile": 75,
+    "anomalyK": "3",
+    "anomalyMinimumDeviation": "0.05",
+    "minimumRetained": 8,
+    "backtestHorizon": 6
+  },
+  "workloads": {
+    "mode": "Tag",
+    "tagKey": "workload",
+    "mappingPath": ""
+  },
+  "sources": [
+    {
+      "id": "ea-actual",
+      "kind": "AzureStorage",
+      "label": "EA actual cost (before migration)",
+      "storageResourceId": "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-finops/providers/Microsoft.Storage/storageAccounts/stfinopsexports",
+      "container": "exports",
+      "prefix": "enrollment/ea-actual-monthly",
+      "path": "",
+      "agreement": "Auto"
+    },
+    {
+      "id": "mca-actual",
+      "kind": "AzureStorage",
+      "label": "MCA actual cost (after migration)",
+      "storageResourceId": "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-finops/providers/Microsoft.Storage/storageAccounts/stfinopsexports",
+      "container": "exports",
+      "prefix": "billingprofile/mca-actual-monthly",
+      "path": "",
+      "agreement": "Auto"
+    }
+  ],
+  "migration": {
+    "boundaryDate": "2026-03-01"
+  },
+  "scheduledItems": [
+    {
+      "id": "ri-renewal-2027-01",
+      "type": "Renewal",
+      "description": "Three-year VM reservation renewal",
+      "startMonth": "2027-01",
+      "endMonth": "",
+      "recurrence": "OneTime",
+      "amount": "48000",
+      "baselineTreatment": "Additive",
+      "replacedAmount": "",
+      "commitmentId": "11111111-2222-3333-4444-555555555555"
+    },
+    {
+      "id": "new-analytics-platform",
+      "type": "BusinessChange",
+      "description": "New analytics platform goes live",
+      "startMonth": "2027-02",
+      "endMonth": "",
+      "recurrence": "Monthly",
+      "amount": "12500",
+      "baselineTreatment": "Additive",
+      "replacedAmount": "",
+      "commitmentId": ""
+    }
+  ]
+}

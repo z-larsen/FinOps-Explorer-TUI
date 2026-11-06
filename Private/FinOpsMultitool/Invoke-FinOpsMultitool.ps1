@@ -4699,6 +4699,16 @@ h2[id] { scroll-margin-top: 85px; }
     # =====================================================================
     Show-Banner
 
+    # Standalone forecast: offer the pre-credit forecast before the scan workflow.
+    $forecastModule = Join-Path $PSScriptRoot '../FinOpsForecast/FinOpsForecast.psm1'
+    if (-not $NonInteractive -and -not $Scans -and -not $DataSource -and (Test-Path -LiteralPath $forecastModule)) {
+        Import-Module $forecastModule -Force
+        if ((Select-FinOpsExplorerMode -Accessible:$Accessible) -eq 'Forecast') {
+            Invoke-FinOpsForecast -OutputPath $OutputPath -Accessible:$Accessible
+            return
+        }
+    }
+
     # Step 1: Connect & pick subscription
     $subs = Select-Subscription -PreselectedId $SubscriptionId
     if (-not $subs) {

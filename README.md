@@ -19,6 +19,7 @@ replace their ingestion pipelines or monitor the environment between runs.
 - [Run a scan from start to finish](#run-a-scan-from-start-to-finish)
 - [Review and share the results](#review-and-share-the-results)
 - [Use FinOps Explorer with Fabric](#use-finops-explorer-with-fabric)
+- [Forecast pre-credit cost and workload growth](#forecast-pre-credit-cost-and-workload-growth)
 
 ## Startup screen
 
@@ -391,12 +392,37 @@ set up an ingestion pipeline. See Microsoft's
 and [FinOps hubs overview](https://learn.microsoft.com/cloud-computing/finops/toolkit/hubs/finops-hubs-overview)
 for the upstream architecture and setup requirements.
 
+## Forecast pre-credit cost and workload growth
+
+This standalone copy adds a fiscal-year forecast built from your own Cost
+Management exports. It shows actuals to date plus the rest of the year as a
+central estimate with a sensitivity range, and which workloads drove the
+growth. Amounts are pre-credit (cost before Azure credits and prepayment), with
+Marketplace and tax excluded by default. It reads EA, MCA, and FOCUS
+actual-cost exports, joins EA and MCA history across a migration, and falls
+back to manual monthly inputs when no exports exist.
+
+```powershell
+Start-FinOpsForecast -WorkspaceName contoso-fy27
+```
+
+You can also choose **Pre-credit forecast and workload growth** at the first
+prompt of `Start-FinOpsExplorer`. Scripted Explorer runs (`-NonInteractive`,
+`-Scans`, or `-DataSource`) skip that prompt.
+
+The forecast reads Azure data only. It needs 12 or more complete months, asks
+for a decision whenever the data is ambiguous, and won't save a forecast until
+every required check passes. See the [usage guide](docs/forecast.md) and the
+[design and integration plan](docs/forecast-design.md).
+
 ## Reports and privacy
 
 Scans read Azure data and write **local reports**. By default, each run creates
 a private timestamped directory beneath `FinOpsToolkit\Explorer\Reports` in
 the current user's local application data directory. It contains CSV results,
-an HTML report, and a text summary.
+an HTML report, and a text summary. The forecast also keeps a private
+workspace per name beneath `FinOpsToolkit\Explorer\Forecast` with its
+settings, review decisions, cached export history, and saved forecasts.
 
 Reports can include tenant/subscription identifiers, resource names, tags,
 billing information, and costs. Do not upload reports, credentials, access
@@ -439,6 +465,16 @@ that every Azure scan works for your identity and data source.
 Use a test scope first and review results before wider use. Report reproducible
 issues with sanitized details only.
 
+The forecast has its own Pester 6 suite in `Tests/`, using synthetic data only:
+
+```powershell
+.\scripts\Invoke-ForecastTests.ps1 -ToolkitRoot '<path-to-finops-toolkit-repository>'
+```
+
+It covers export selection and verification, EA-to-MCA joins, the forecast
+method, workloads, manual inputs, the workspace store, the console screens,
+end-to-end runs, and read-only safety. It doesn't test live Azure access.
+
 For the original public packaging, all 79 PowerShell files passed syntax parsing,
 the KPI catalog parsed as JSON, and the root module and public entry point loaded
 without running scans. The bundled empty Power BI template had its opaque
@@ -458,9 +494,12 @@ they don't establish live Azure data access.
 
 The public launchers and shared runtime should match the Toolkit
 implementation. Distribution differences are limited to standalone version
-loading and report labels, documentation, and the sanitized Power BI template.
-The KPI helper and catalog are copied unchanged; the report renderer retains
-four standalone version overlays.
+loading and report labels, the forecast hook, documentation, and the sanitized
+Power BI template. The KPI helper and catalog are copied unchanged; the report
+renderer retains four standalone version overlays, and the launcher has one
+nine-line hook that offers the forecast. The forecast itself lives in
+`Private/FinOpsForecast` and `Public/Start-FinOpsForecast.ps1`, outside the
+compared runtime, so a Toolkit sync doesn't touch it.
 
 To compare a future refresh with a local Toolkit source checkout, run:
 
