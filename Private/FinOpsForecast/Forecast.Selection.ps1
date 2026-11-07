@@ -51,7 +51,7 @@ function Get-ForecastRunCoverage {
     }
     $monthStart = Get-ForecastMonthStart -MonthKey $Month
     $runStart = ([datetime]$Result.Start).Date
-    $runEnd = if ($Result.End) { ([datetime]$Result.End).Date } else { $runStart }
+    $runEnd = if ($Result.End) { Get-ForecastRunLastDate -Start $Result.Start -End $Result.End } else { $runStart }
     if ($runStart -gt $monthStart) { return 'Partial' }
     if ($runEnd -ge $lastDay) { return 'Full' }
     return 'MonthToDate'

@@ -152,11 +152,18 @@ function Get-ForecastIngestProfile {
     # makes the next refresh re-read every run.
     param([Parameter(Mandatory)]$Settings)
     # The tag value is captured in every mode, so switching workload modes
-    # doesn't force a re-read; only a different tag key does.
+    # doesn't force a re-read. Source identity and interpretation do.
     $values = [ordered]@{
-        version      = 5
+        version      = 6
         tagKey       = ([string]$Settings.workloads.tagKey).Trim()
         boundaryDate = [string]$Settings.migration.boundaryDate
+        sources      = @($Settings.sources | Sort-Object id | ForEach-Object {
+                [ordered]@{
+                    id = [string]$_.id; kind = [string]$_.kind; path = [string]$_.path
+                    storageResourceId = [string]$_.storageResourceId; container = [string]$_.container
+                    prefix = [string]$_.prefix; agreement = [string]$_.agreement
+                }
+            })
     }
-    return [pscustomobject]@{ Values = $values; Hash = Get-ForecastHash -Text (($values | ConvertTo-Json -Compress)) -Length 16 }
+    return [pscustomobject]@{ Values = $values; Hash = Get-ForecastHash -Text (($values | ConvertTo-Json -Depth 5 -Compress)) -Length 16 }
 }

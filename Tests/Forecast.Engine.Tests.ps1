@@ -237,6 +237,28 @@ Describe 'Forecast engine' {
             [decimal]::Round($november.TotalCentral, 6) | Should -Be 3550
         }
 
+        It 'Keeps a scheduled purchase when only a refund for that commitment has posted' {
+            $dataset = New-TestDataset -Values (New-RateSeries ([decimal[]]@(1..12 | ForEach-Object { 3000 })))
+            $month = (New-TestDataset -Values ([ordered]@{ '2026-11' = 400 })).Months[0]
+            $month.Status = 'Provisional'; $month.DataThrough = [datetime]'2026-11-04'
+            $month.Purchase = -20d; $month.Headline = 380d
+            $dataset.Months += $month
+            $dataset.Cells = @([pscustomobject]@{ Month = '2026-11'; Stream = 'Purchase'; ChargeType = 'Refund'; CommitmentId = 'ri-synthetic'; Cost = -20d })
+            $settings = New-TestSettings
+            $settings.scheduledItems = @([pscustomobject]@{
+                    id = 'scheduled-ri'; type = 'Purchase'; description = 'Synthetic monthly commitment'
+                    startMonth = '2026-11'; endMonth = ''; recurrence = 'Monthly'; amount = '500'
+                    baselineTreatment = 'Additive'; replacedAmount = ''; commitmentId = 'ri-synthetic'
+                })
+            $model = Invoke-TestModel -Dataset $dataset -Settings $settings
+            $november = $model.Projection.Rows | Where-Object Month -EQ '2026-11'
+            $november.Actual | Should -Be 380
+            $november.Scheduled | Should -Be 500
+            $november.ScheduledAlreadyPosted | Should -Be 0
+            [decimal]::Round($november.TotalCentral, 6) | Should -Be 3480
+            ($model.Projection.Rows | Where-Object Month -EQ '2026-12').Scheduled | Should -Be 500
+        }
+
         It 'Rejects duplicate scheduled item IDs and flags near-duplicate schedules' {
             $settings = New-TestSettings
             $item = @{ type = 'Purchase'; description = 'Synthetic RI'; startMonth = '2026-12'; endMonth = ''; recurrence = 'OneTime'; amount = '100'; baselineTreatment = 'Additive'; replacedAmount = '' }

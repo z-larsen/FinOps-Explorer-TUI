@@ -44,11 +44,11 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
 ## Data flow
 
 1. **Discover runs.** List every blob under each source. Each `manifest.json` describes one run: `runId`, `submittedTime`, `startDate`, `endDate`, `exportConfig.resourceId` and `type`, and every partition with `byteCount` and `dataRowCount`. CSV files that no manifest claims become legacy runs, which need a reviewer's approval.
-2. **Read runs.** Download every declared partition and check its byte count. Stream it through `TextFieldParser`, then check its row count. Any missing partition, size or row mismatch, or unreadable row makes the run unusable instead of quietly short. So does amortized content: EA and MCA amortized files have the same columns as actual cost, so a run is rejected when reservation- or savings-plan-covered usage has a cost, or when it has unused-benefit charges. Actual cost has neither.
+2. **Read runs.** Reject duplicate partition references, including aliases resolving to the same file. Download every distinct declared partition and check its byte count. Stream it through `TextFieldParser`, then check its row count. Any missing partition, size or row mismatch, unreadable row, or invalid manifest date range makes the run unusable instead of quietly short. So does amortized content: EA and MCA amortized files have the same columns as actual cost, so a run is rejected when reservation- or savings-plan-covered usage has a cost, or when it has unused-benefit charges. Actual cost has neither.
 3. **Reduce, then classify.** The C# reducer sums rows that share the same raw values into tuples. A PowerShell reducer with identical output covers hosts that block `Add-Type`. PowerShell then applies the rules once per tuple: schema, charge stream, publisher class, pricing model, agreement, migration-boundary side, and workload tag.
-4. **Cache.** Results are cached per run. A refresh re-reads only runs whose manifest, partitions, or ingest profile (tag key, boundary date) changed. A new cache replaces the old one only after every source was read.
+4. **Cache.** Results are cached per run. The signature includes manifest dates and modification time, plus each partition's modification time, size, and declared counts. Same-size corrections are re-read when their modification time changes; missing partition timestamps disable reuse. The ingest profile includes source locations and schema overrides, the tag key, the boundary date, and the ingestion version. Changing it requires a refresh. If a previously usable cached run becomes unreadable or invalid, refresh fails and keeps the previous cache. A newly discovered incomplete run can still be recorded while an older complete run remains selected.
 5. **Select.** For each (original scope, dataset, month), prefer a run that covers the whole month, then a legacy run, then one still in progress; among those, the latest complete, approved run wins. A run that starts after the first of the month can't stand in for it and raises a warning. A legacy file only counts as covering the whole month if its rows reach the month's last day; otherwise it's treated as still in progress. A month counts as final once a whole-month run was submitted at least the grace period after month end. A corrected rerun replaces the month instead of adding to it. Several legacy files for one month raise a warning, because they're more likely different datasets than reruns.
-6. **Assemble.** Apply overlap, boundary, scope, and filter rules, then reconcile every run-month to its raw total. Overlap is decided per subscription, or per billing profile for charges without a subscription. Rows dated outside a run's own dates are reported, not counted. A final month whose data ends before the month does raises a warning.
+6. **Assemble.** Apply overlap, boundary, scope, and filter rules, then reconcile every run-month to its raw total. Overlap is decided per subscription, or per billing profile for charges without a subscription. Check each row's date, not just its month, against the run range. Outside-range charges and row counts appear once, on that run's first selected reconciliation row, in both the raw total and the excluded amount. An end at midnight on the next month's first day is exclusive; other end dates are inclusive. A final month whose last charge precedes month end raises a warning.
 7. **Model, gate, report.** Run the forecast and the readiness checks, then write reports. Save a vintage only when the forecast is Ready.
 
 ### Charge streams
@@ -70,7 +70,7 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
 - **Growth:** the median of retained changes. The sensitivity range is the 25th to 75th percentile (PERCENTILE.INC). At least 8 of 11 must be retained.
 - **Baseline:** the latest month's run rate. If that month is anomalous, a separate review picks the latest month, the median of the last three months, or a manual value with a reason.
 - **Projection:** baseline × (1 + g)^h × days / 30 for each path, where h is months after the window.
-- **Current month:** actuals so far plus the forecast for the remaining days. A scheduled item whose commitment ID matches a purchase already posted that month isn't added again.
+- **Current month:** actuals so far plus the forecast for the remaining days. Verified manifest coverage includes days with no charges, including an empty partition; it isn't shortened to the last charge date. A configured range extending beyond submission is capped at the prior day, or a later day already carrying actual charges. Legacy files still use observed row dates. Different coverage cutoffs across selected partial-month runs block Ready until refreshed to a common cutoff. A scheduled item whose commitment ID matches a posted Purchase charge isn't added again; a Refund alone does not satisfy it.
 - **Scheduled items:** added to every path. Additive adds the amount, AlreadyInBaseline adds nothing, and ReplacesBaselineAmount adds the amount minus what it replaces.
 - **Fiscal-year totals:** sum one consistent path per scenario, never independent percentiles.
 - **Backtest:** every cutoff with a full window and a later month, using automatic exclusions. It reports mean absolute error, bias, and how often actuals fell in range. These are observed results, not a calibration.
@@ -131,11 +131,12 @@ Validating these against sanitized real exports is the main open task.
 |---|---|
 | Migration boundaries | `Forecast.Exports.Tests.ps1`: requires a boundary; joins EA before and MCA after without overlap |
 | Overlapping runs | Exports: one run per month, no stacking, corrections replace, idempotent; a tail-of-month run never replaces a whole month; month-to-date runs stay provisional; overlapping export scopes, including charges without a subscription |
-| Missing partitions or months | Exports: missing partition, row and byte mismatches, newest-incomplete fallback; Engine: missing months |
+| Missing partitions or months | Exports: missing partition, row and byte mismatches, duplicate partition aliases, invalid manifest dates, newest-incomplete fallback; Engine: missing months |
 | Zeros and refunds | Engine: undefined change after a zero month; Inputs: missing vs verified zero; Exports: signed refunds, positive refunds flagged |
 | Sorting | Engine: date-key ordering with shuffled input |
 | Duplicate keys and schedules | Engine: duplicate IDs and near-duplicate schedules; Inputs: duplicate months and charge IDs; Workloads: mapping duplicates; Exports: identical rows kept |
-| Failed refresh keeps old data | `Forecast.State.Tests.ps1` |
+| Failed refresh keeps old data | State: unavailable source, a missing or invalid formerly readable partition; a new incomplete run doesn't displace an older good run |
+| Corrections invalidate the cache | State: same-size in-place charge correction, changed manifest dates, changed source interpretation, missing modification timestamps |
 | First-row calculations | Engine: 11 comparisons start after the first month; Workloads: new workload with undefined growth |
 | Ties | Workloads: ID tie-breaks in every view; earliest month for equal increases |
 | Expanded datasets | Workloads: 600 workloads × 24 months, no truncation |
@@ -144,8 +145,9 @@ Validating these against sanitized real exports is the main open task.
 | End to end, safety, console | `Forecast.EndToEnd.Tests.ps1`, `Forecast.Safety.Tests.ps1`, `Forecast.Console.Tests.ps1` |
 | Compiled and PowerShell reducers agree | Exports: exact parity for EA, MCA, and FOCUS, including escaped and date-like tag values |
 | Review decisions stay stable | Exports: a publisher decision survives new rows from the same publisher and reopens for a new one |
-| Nothing dropped silently | Exports: rows outside a run's dates are reported, reconciled, and warn on Source; the cache keeps their total exactly |
-| Scheduled items in the current month | Engine: a purchase already posted isn't added again; an unlinked purchase item gets a note |
+| Nothing dropped silently | Exports: same-month dates outside either endpoint and exclusive month boundaries; raw totals include every excluded row once |
+| Scheduled items in the current month | Engine: a purchase already posted isn't added again; refunds don't suppress scheduled purchases; an unlinked purchase item gets a note |
+| Partial-month coverage | Exports: sparse and zero-charge partitions retain declared coverage, future days aren't claimed, and mismatched scope cutoffs block Ready |
 | Month coverage from the data | Exports: a loose file whose rows stop mid-month stays provisional; a final month whose data ends early warns |
 | Amortized data rejected | Exports: EA covered usage with a cost and an MCA unused-reservation row are rejected with the reason shown; an actual-cost file wins over an amortized copy beside it |
 | Rounding isn't a reconciliation failure | Exports: differences under 0.000001 pass, larger ones fail |

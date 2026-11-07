@@ -119,12 +119,20 @@ function Get-ForecastManifestScope {
     return $scope
 }
 
+function Get-ForecastRunLastDate {
+    param([AllowNull()]$Start, [AllowNull()]$End)
+    if ($null -eq $End) { return $null }
+    $last = [datetime]$End
+    # Keep the existing exclusive-end convention for midnight on a month's first day.
+    if ($null -ne $Start -and $last -gt $Start -and $last.Day -eq 1 -and $last.TimeOfDay -eq [TimeSpan]::Zero) { $last = $last.AddDays(-1) }
+    return $last.Date
+}
+
 function Get-ForecastRunMonths {
     param([AllowNull()]$Start, [AllowNull()]$End)
     if ($null -eq $Start) { return , [string[]]@() }
     $last = if ($null -ne $End -and $End -ge $Start) { $End } else { $Start }
-    # An end date at midnight on the first of a month belongs to the prior month.
-    if ($last -gt $Start -and $last.Day -eq 1 -and $last.TimeOfDay -eq [TimeSpan]::Zero) { $last = $last.AddSeconds(-1) }
+    $last = Get-ForecastRunLastDate -Start $Start -End $last
     return , [string[]](Get-ForecastMonthSpan -First (ConvertTo-ForecastMonthKey -Date $Start) -Last (ConvertTo-ForecastMonthKey -Date $last))
 }
 
@@ -150,8 +158,11 @@ function Find-ForecastExportRuns {
         $submitted = if ($manifest) { ConvertFrom-ForecastDate -Value $manifest.runInfo.submittedTime } else { $null }
         if ($manifest -and -not $submitted) { $issues.Add((New-ForecastIssue -Code 'RUN-MANIFEST' -Message 'The manifest has no readable submittedTime.')) }
         if ($manifest -and -not $start) { $issues.Add((New-ForecastIssue -Code 'RUN-MANIFEST' -Message 'The manifest has no readable startDate.')) }
+        if ($manifest -and -not $end) { $issues.Add((New-ForecastIssue -Code 'RUN-MANIFEST' -Message 'The manifest has no readable endDate.')) }
+        elseif ($start -and $end -lt $start) { $issues.Add((New-ForecastIssue -Code 'RUN-MANIFEST' -Message 'The manifest endDate precedes its startDate.')) }
         $format = if ($manifest) { [string]$manifest.deliveryConfig.fileFormat } else { '' }
         $parts = [Collections.Generic.List[object]]::new()
+        $partitionNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($declared in @($manifest.blobs)) {
             if ($null -eq $declared) { continue }
             $declaredName = ([string]$declared.blobName).TrimStart('/')
@@ -159,12 +170,21 @@ function Find-ForecastExportRuns {
             # Manifests name blobs from the container root; a local copy may
             # start lower, so fall back to the file name inside this run folder.
             $resolved = if ($byName.ContainsKey($declaredName)) { $declaredName } elseif ($leaf -and $byName.ContainsKey($folder + $leaf)) { $folder + $leaf } else { $null }
+            $identity = if ($resolved) { $resolved } else { $declaredName }
+            if (-not $partitionNames.Add($identity)) {
+                $issues.Add((New-ForecastIssue -Code 'RUN-DUPLICATEPARTITION' -Message "The manifest lists partition $(ConvertTo-ForecastSafeText $identity 200) more than once. The run isn't used."))
+                continue
+            }
             $byteCount = $null; $rowCount = $null
             $parsedLong = 0L
             if ($null -ne $declared.byteCount -and [long]::TryParse([string]$declared.byteCount, [ref]$parsedLong)) { $byteCount = $parsedLong }
             if ($null -ne $declared.dataRowCount -and [long]::TryParse([string]$declared.dataRowCount, [ref]$parsedLong)) { $rowCount = $parsedLong }
             if ($resolved) { [void]$claimed.Add($resolved) }
-            $parts.Add([pscustomobject]@{ Declared = $declaredName; Name = $resolved; ByteCount = $byteCount; RowCount = $rowCount; Length = if ($resolved) { $byName[$resolved].Length } else { $null } })
+            $parts.Add([pscustomobject]@{
+                    Declared = $declaredName; Name = $resolved; ByteCount = $byteCount; RowCount = $rowCount
+                    Length = if ($resolved) { $byName[$resolved].Length } else { $null }
+                    LastModified = if ($resolved) { $byName[$resolved].LastModified } else { $null }
+                })
         }
         if ($manifest -and $parts.Count -eq 0 -and $manifest.PSObject.Properties.Name -contains 'blobs') {
             $issues.Add((New-ForecastIssue -Code 'RUN-EMPTY' -Severity 'Info' -Message 'The manifest lists no partitions; the run has no data rows.'))
@@ -176,6 +196,7 @@ function Find-ForecastExportRuns {
                 SourceId      = [string]$Source.id
                 Folder        = $folder
                 ManifestName  = $manifestBlob.Name
+                ManifestModified = $manifestBlob.LastModified
                 HasManifest   = $null -ne $manifest
                 ExportName    = if ($manifest) { ConvertTo-ForecastSafeText ([string]$manifest.exportConfig.exportName) 120 } else { '' }
                 OriginalScope = if ($manifest) { Get-ForecastManifestScope -ResourceId ([string]$manifest.exportConfig.resourceId) } else { $null }
@@ -209,7 +230,7 @@ function Find-ForecastExportRuns {
                 Folder = $folder; ManifestName = $null; HasManifest = $false; ExportName = ''; OriginalScope = $null; Dataset = ''; DataVersion = ''
                 Format = if ($blob.Name -match '\.parquet$') { 'Parquet' } else { 'Csv' }
                 Start = $start; End = $end; Submitted = $blob.LastModified; Months = Get-ForecastRunMonths -Start $start -End $end
-                Parts = @([pscustomobject]@{ Declared = $blob.Name; Name = $blob.Name; ByteCount = $null; RowCount = $null; Length = $blob.Length })
+                Parts = @([pscustomobject]@{ Declared = $blob.Name; Name = $blob.Name; ByteCount = $null; RowCount = $null; Length = $blob.Length; LastModified = $blob.LastModified })
                 Unsupported = $blob.Name -match '\.parquet$'; Issues = $issues
             })
     }
@@ -220,7 +241,12 @@ function Get-ForecastRunSignature {
     # Changes when the run's manifest, partitions, or delivery time change, so
     # a cached ingest is reused only for the identical run.
     param([Parameter(Mandatory)]$Run)
-    $parts = @($Run.Parts | ForEach-Object { "$($_.Declared)=$($_.Name)=$($_.ByteCount)=$($_.RowCount)=$($_.Length)" }) -join ';'
-    $submitted = if ($Run.Submitted) { ([datetime]$Run.Submitted).ToString('o', $script:ForecastInvariant) } else { '' }
-    return Get-ForecastHash -Text "$($Run.RunId)|$($Run.Folder)|$($Run.Dataset)|$($Run.OriginalScope)|$submitted|$parts"
+    $parts = @($Run.Parts | ForEach-Object {
+            $modified = if ($_.LastModified) { (ConvertFrom-ForecastDate $_.LastModified).ToString('o', $script:ForecastInvariant) } else { '' }
+            "$($_.Declared)=$($_.Name)=$($_.ByteCount)=$($_.RowCount)=$($_.Length)=$modified"
+        }) -join ';'
+    $dates = @(foreach ($name in 'Submitted', 'Start', 'End', 'ManifestModified') {
+            if ($Run.$name) { (ConvertFrom-ForecastDate $Run.$name).ToString('o', $script:ForecastInvariant) } else { '' }
+        }) -join '|'
+    return Get-ForecastHash -Text "$($Run.RunId)|$($Run.Folder)|$($Run.Dataset)|$($Run.OriginalScope)|$($Run.DataVersion)|$($Run.HasManifest)|$dates|$parts"
 }

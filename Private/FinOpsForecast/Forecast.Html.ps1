@@ -134,7 +134,7 @@ th{background:#f3f3f3;position:sticky;top:0}td.num{text-align:right;white-space:
         }
     }
     [void]$sb.Append('<h2>Reconciliation</h2>')
-    [void]$sb.Append((ConvertTo-ForecastHtmlTable -Id 'reconciliation' -Rows $Dataset.Reconciliation -Columns @((New-ForecastColumn Month), (New-ForecastColumn Source), (New-ForecastColumn Rows), (New-ForecastColumn RawTotal 'Raw total' amount), (New-ForecastColumn IncludedHeadline 'Included' amount), (New-ForecastColumn ExcludedMarketplace 'Marketplace' amount), (New-ForecastColumn ExcludedScope 'Out of scope' amount), (New-ForecastColumn ExcludedBoundary 'Boundary' amount), (New-ForecastColumn Credits -Format amount), (New-ForecastColumn Difference -Format amount))))
+    [void]$sb.Append((ConvertTo-ForecastHtmlTable -Id 'reconciliation' -Rows $Dataset.Reconciliation -Columns @((New-ForecastColumn Month), (New-ForecastColumn Source), (New-ForecastColumn Rows), (New-ForecastColumn RawTotal 'Raw total' amount), (New-ForecastColumn IncludedHeadline 'Included' amount), (New-ForecastColumn ExcludedMarketplace 'Marketplace' amount), (New-ForecastColumn ExcludedScope 'Out of scope' amount), (New-ForecastColumn ExcludedBoundary 'Boundary' amount), (New-ForecastColumn ExcludedOutsideRange 'Outside run dates' amount), (New-ForecastColumn Credits -Format amount), (New-ForecastColumn Difference -Format amount))))
     [void]$sb.Append("<h2>Method and disclosure</h2><pre>$(ConvertTo-ForecastHtmlText ($Disclosure -join "`n"))</pre>")
     [void]$sb.Append(@'
 <script>

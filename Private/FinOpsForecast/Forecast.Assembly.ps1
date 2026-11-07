@@ -270,10 +270,28 @@ function Merge-ForecastExportHistory {
         $final = @($selectedRuns | Where-Object { -not $_.Final }).Count -eq 0
         $status = if ($notes.Count) { 'Incomplete' } elseif ($final) { 'Complete' } else { 'Provisional' }
         if ($totals.Currencies.Count -gt 1) { $notes.Add("Multiple billing currencies: $(@($totals.Currencies) -join ', ').") }
-        $through = $null
+        $through = $null; $observedThrough = $null
+        $coverageDates = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+        $monthStart = Get-ForecastMonthStart -MonthKey $month
+        $lastDay = (Get-ForecastMonthEnd -MonthKey $month).AddDays(-1)
         foreach ($selected in $selectedRuns) {
-            $stat = @($byRun[[string]$selected.RunKey].MonthStats | Where-Object Month -EQ $month)[0]
-            if ($stat -and $stat.Through -and ($null -eq $through -or $stat.Through -lt $through)) { $through = $stat.Through }
+            $runResult = $byRun[[string]$selected.RunKey]
+            $stat = @($runResult.MonthStats | Where-Object Month -EQ $month)[0]
+            $runThrough = if ($stat -and $stat.Through) { [datetime]$stat.Through } else { $null }
+            if ($runThrough -and ($null -eq $observedThrough -or $runThrough -lt $observedThrough)) { $observedThrough = $runThrough }
+            if ($runResult.HasManifest -and $runResult.Start -and $runResult.End) {
+                $coveredEnd = Get-ForecastRunLastDate -Start $runResult.Start -End $runResult.End
+                if ($coveredEnd -gt $lastDay) { $coveredEnd = $lastDay }
+                # A configured full-month range can be delivered before month end.
+                # Only elapsed days (or a day already carrying charges) are covered.
+                if ($runResult.Submitted -and $coveredEnd -ge ([datetime]$runResult.Submitted).Date) {
+                    $coveredEnd = ([datetime]$runResult.Submitted).Date.AddDays(-1)
+                }
+                if ($runThrough -and $runThrough -gt $coveredEnd) { $coveredEnd = $runThrough }
+                if ($coveredEnd -ge $monthStart) { $runThrough = $coveredEnd }
+            }
+            if ($runThrough -and ($null -eq $through -or $runThrough -lt $through)) { $through = $runThrough }
+            if ($runThrough) { [void]$coverageDates.Add($runThrough.ToString('yyyy-MM-dd', $script:ForecastInvariant)) }
             $raw = if ($stat) { [decimal]$stat.Total } else { 0d }
             $rawRows = if ($stat) { [long]$stat.Rows } else { 0L }
             $runEntries = $entriesByRunMonth["$month|$($selected.RunKey)"]
@@ -282,11 +300,14 @@ function Merge-ForecastExportHistory {
             if ($runEntries) { foreach ($runEntry in $runEntries) { $sum[$runEntry.Disposition] += [decimal]$runEntry.Cell.Cost } }
             $accounted = 0d
             foreach ($value in $sum.Values) { $accounted += $value }
+            $outsideCost = if ($firstSelectedMonth[[string]$selected.RunKey] -eq $month) { [decimal]$runResult.OutsideTotal } else { 0d }
+            $outsideRows = if ($firstSelectedMonth[[string]$selected.RunKey] -eq $month) { [long]$runResult.OutsideRows } else { 0L }
+            $raw += $outsideCost; $rawRows += $outsideRows; $accounted += $outsideCost
             $reconciliation.Add([pscustomobject]@{
                     Month = $month; Source = $selected.Label; RunId = $selected.RunId; Final = $selected.Final; Rows = $rawRows; RawTotal = $raw
                     IncludedHeadline = $sum.Included; Credits = $sum.Credit; ExcludedTax = $sum.Tax; ExcludedMarketplace = $sum.Marketplace
                     ExcludedUnattributed = $sum.Unattributed; ExcludedBoundary = $sum.Boundary; ExcludedScope = $sum.Scope; ExcludedOverlap = $sum.Overlap
-                    ExcludedOutsideRange = if ($firstSelectedMonth[[string]$selected.RunKey] -eq $month) { [decimal]$byRun[[string]$selected.RunKey].OutsideTotal } else { 0d }
+                    ExcludedOutsideRange = $outsideCost
                     Difference = $raw - $accounted; Note = if ($selected.Superseded.Count) { "Replaces $($selected.Superseded.Count) earlier run(s)." } else { '' }
                 })
             if ($stat -and $stat.PositiveRefundRows -gt 0) {
@@ -295,11 +316,15 @@ function Merge-ForecastExportHistory {
                             -Options @('Acknowledged') -Suggested 'Acknowledged'))
             }
         }
-        $lastDay = (Get-ForecastMonthEnd -MonthKey $month).AddDays(-1)
-        if ($status -eq 'Complete' -and $through -and ([datetime]$through).Date -lt $lastDay) {
-            $gap = [int]($lastDay - ([datetime]$through).Date).TotalDays
-            $notes.Add("Data ends $gap day(s) before month end.")
-            $issues.Add((New-ForecastIssue -Code 'RUN-EARLYEND' -Severity 'Warn' -Message "$month is final, but its data ends on $(([datetime]$through).ToString('yyyy-MM-dd', $script:ForecastInvariant)), $gap day(s) before month end. Check the export covers the whole month." -Subject $month))
+        if ($status -ne 'Complete' -and $coverageDates.Count -gt 1) {
+            $status = 'Incomplete'
+            $notes.Add('Selected runs have different coverage cutoffs.')
+            $issues.Add((New-ForecastIssue -Code 'RUN-COVERAGE' -Message "Selected runs for $month cover different dates ($(@($coverageDates) -join ', ')). Refresh until their cutoffs align; one remaining-days forecast would count some days twice." -Subject $month))
+        }
+        if ($status -eq 'Complete' -and $observedThrough -and $observedThrough.Date -lt $lastDay) {
+            $gap = [int]($lastDay - $observedThrough.Date).TotalDays
+            $notes.Add("Last charge is dated $gap day(s) before month end.")
+            $issues.Add((New-ForecastIssue -Code 'RUN-EARLYEND' -Severity 'Warn' -Message "$month is final, but its last charge is dated $($observedThrough.ToString('yyyy-MM-dd', $script:ForecastInvariant)), $gap day(s) before month end. Check the export covers the whole month." -Subject $month))
         }
         $runRate = $totals.RunRate
         $rows.Add([pscustomobject]@{

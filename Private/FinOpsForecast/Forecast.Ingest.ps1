@@ -197,6 +197,8 @@ function Invoke-ForecastRunIngest {
     $sourceAgreement = if ($Source.agreement -in 'EA', 'MCA') { [string]$Source.agreement } else { 'Auto' }
     $boundary = if ($IngestProfile.Values.boundaryDate) { ConvertFrom-ForecastDate -Value $IngestProfile.Values.boundaryDate } else { $null }
     $declaredMonths = [Collections.Generic.HashSet[string]]::new([string[]]@($Run.Months), [StringComparer]::Ordinal)
+    $rangeStart = if ($Run.Start) { ([datetime]$Run.Start).Date } else { $null }
+    $rangeEnd = Get-ForecastRunLastDate -Start $Run.Start -End $Run.End
     $dateMemo = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $subMemo = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
     $chargeMemo = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
@@ -269,7 +271,10 @@ function Invoke-ForecastRunIngest {
                 }
                 if ($sub -eq '!') { $invalid.Subscription += $rows; continue }
                 $month = $dateInfo.Month
-                if ($declaredMonths.Count -gt 0 -and -not $declaredMonths.Contains($month)) { $outsideRows += $rows; $outsideTotal += $cost; continue }
+                if (($rangeStart -and $dateInfo.Date -lt $rangeStart) -or ($rangeEnd -and $dateInfo.Date -gt $rangeEnd) -or
+                    ($declaredMonths.Count -gt 0 -and -not $declaredMonths.Contains($month))) {
+                    $outsideRows += $rows; $outsideTotal += $cost; continue
+                }
 
                 $stats = $null
                 if (-not $monthStats.TryGetValue($month, [ref]$stats)) {

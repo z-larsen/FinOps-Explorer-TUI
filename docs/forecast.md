@@ -78,7 +78,7 @@ Purchases and refunds aren't grown with the run rate, so future commitments come
 - **AlreadyInBaseline**: adds nothing, because the run rate already includes it.
 - **ReplacesBaselineAmount**: adds the amount minus the part of the baseline it replaces.
 
-If an item covers an existing reservation or savings plan, give its commitment ID (the order ID or the full resource ID). Then, when that purchase has already posted in the current month, the item isn't added on top of the month-to-date actuals; the monthly CSV shows it under `ScheduledAlreadyPosted`. A Purchase or Renewal item without a commitment ID gets a note in any current month where purchases have already posted, so you can check it isn't counted twice.
+If an item covers an existing reservation or savings plan, give its commitment ID (the order ID or the full resource ID). Then, when that purchase has already posted in the current month, the item isn't added on top of the month-to-date actuals; the monthly CSV shows it under `ScheduledAlreadyPosted`. A refund for the same commitment does not mean the purchase has posted. A Purchase or Renewal item without a commitment ID gets a note in any current month where purchases have already posted, so you can check it isn't counted twice.
 
 ## Workloads
 
@@ -120,6 +120,7 @@ It refreshes, writes reports, and saves a vintage if the forecast is Ready. If i
 - **Central estimate** uses the median month-over-month change in run rate.
 - **Sensitivity range** uses the 25th to 75th percentile of historical changes. It shows how much the history varied. It is **not** a confidence interval.
 - **Fiscal-year totals** add completed months, this month's actuals so far plus the rest of the month, the remaining forecast months, and scheduled items. Low and high each follow one growth path for the whole year.
+- **Month-to-date coverage** comes from the verified run range, bounded by when the run was submitted. Days with no charges aren't forecast again. If selected runs have different coverage cutoffs, Ready is blocked until a refresh brings them into line.
 - **Partial population** means a subscription in scope is missing data in some months. **Stale data** means the last refresh failed or the newest data is old. Both appear on every output.
 
 ## Limits to know
@@ -128,8 +129,11 @@ It refreshes, writes reports, and saves a vintage if the forecast is Ready. If i
 - `RoundingAdjustment` rows only appear at billing scope after an invoice, so subscription-scoped months can differ slightly from invoices.
 - Cost data can change for up to 72 hours after a month ends. A month counts as final only when a whole-month run was submitted after the grace period (3 days by default).
 - A run that starts after the first of a month never replaces that month's whole-month run; it shows as CHECK on the Source line. A month covered only by a run still in progress stays provisional.
-- Rows dated outside a run's own start and end dates aren't counted. They show as CHECK on the Source line and as `ExcludedOutsideRange` in the reconciliation CSV.
-- A final month whose data ends before the month does shows as CHECK on the Source line, in case the export didn't cover the whole month.
+- Rows dated outside a run's own start and end dates aren't counted, even when they fall in the same month. They show as CHECK on the Source line and as `ExcludedOutsideRange` in reconciliation. Their raw costs and row counts remain in the reconciliation totals.
+- A manifest that lists the same partition twice is rejected, not counted twice. Identical legitimate charge rows within distinct partitions are still kept.
+- A final month whose last charge precedes month end shows as CHECK on the Source line, in case the export didn't cover the whole month.
+- If an already cached run becomes unreadable or invalid, refresh fails and keeps the last good cache, labeled Stale data.
+- For local copies, updated files must have updated modification times. An in-place change preserving both size and modification time can't be detected from the listing. Changing source settings or ingestion rules requires a refresh.
 - Reconciliation ignores differences under 0.000001, which come from decimal rounding of very long amounts.
 - A first refresh reads about 10 MB of uncompressed CSV a second, roughly 10,000 real cost rows. Thirteen months at a million rows a month takes about 20 to 25 minutes the first time; later refreshes only read new runs.
 - Windows is the verified platform. The code is cross-platform, but Linux and macOS haven't been tested.

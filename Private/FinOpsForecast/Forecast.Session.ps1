@@ -36,12 +36,18 @@ function Update-ForecastExportCache {
                 Write-Progress -Id 82 -ParentId 81 -Activity 'Reading export runs' -Status "Run $runIndex of $($runs.Count)" -PercentComplete ([int](100 * $runIndex / [math]::Max(1, $runs.Count)))
                 $cached = $cachedByKey[[string]$run.RunKey]
                 $text = $null
-                if ($cached -and $cached.Signature -eq (Get-ForecastRunSignature -Run $run) -and $cached.ProfileHash -eq $ingestProfile.Hash -and $cached.Status -in 'Complete', 'Unverified', 'Unsupported') {
+                $hasPartitionVersions = @($run.Parts | Where-Object { -not $_.LastModified }).Count -eq 0
+                $runHasErrors = @($run.Issues | Where-Object Severity -EQ 'Fail').Count -gt 0
+                if ($cached -and -not $runHasErrors -and $hasPartitionVersions -and $cached.Signature -eq (Get-ForecastRunSignature -Run $run) -and $cached.ProfileHash -eq $ingestProfile.Hash -and $cached.Status -in 'Complete', 'Unverified', 'Unsupported') {
                     $text = Get-ForecastCachedRunText -Root $Root -RunKey $run.RunKey
                     if ($text) { $reused++ }
                 }
                 if (-not $text) {
                     $result = Invoke-ForecastRunIngest -Source $source -Run $run -IngestProfile $ingestProfile
+                    if ($cached -and $cached.Status -in 'Complete', 'Unverified' -and $result.Status -notin 'Complete', 'Unverified') {
+                        $reason = @($result.Issues | Where-Object Severity -EQ 'Fail' | ForEach-Object Message) -join ' '
+                        throw "Previously usable run $(ConvertTo-ForecastSafeText $run.RunId 80) is now $($result.Status). The previous cache was retained. $reason"
+                    }
                     $text = ConvertTo-ForecastCacheRecord -Result $result | ConvertTo-Json -Depth 20 -Compress
                     $read++
                 }
@@ -88,7 +94,7 @@ function Get-ForecastDataset {
     $selection = Select-ForecastRuns -Results $results -Settings $Settings -Reviews $Reviews
     $dataset = Merge-ForecastExportHistory -Results $results -Selection $selection -Settings $Settings -Reviews $Reviews
     if ($cache.Meta.profileHash -ne $ingestProfile.Hash) {
-        $dataset.Issues = @($dataset.Issues) + (New-ForecastIssue -Code 'DATA-PROFILE' -Message 'The workload tag key or migration boundary changed since the last refresh. Refresh to re-read the exports.')
+        $dataset.Issues = @($dataset.Issues) + (New-ForecastIssue -Code 'DATA-PROFILE' -Message 'The export sources, workload tag key, migration boundary, or ingestion rules changed since the last refresh. Refresh to re-read the exports.')
     }
     return $dataset
 }

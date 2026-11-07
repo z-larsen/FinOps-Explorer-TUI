@@ -350,7 +350,7 @@ function Invoke-ForecastProjection {
     # commitment isn't added on top of the month-to-date actuals.
     $postedCommitments = @{}
     foreach ($cell in @($Dataset.Cells)) {
-        if ($cell.Stream -ne 'Purchase' -or -not $cell.CommitmentId) { continue }
+        if ($cell.Stream -ne 'Purchase' -or $cell.ChargeType -ne 'Purchase' -or -not $cell.CommitmentId) { continue }
         $cellMonth = [string]$cell.Month
         if (-not $postedCommitments.ContainsKey($cellMonth)) { $postedCommitments[$cellMonth] = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase) }
         [void]$postedCommitments[$cellMonth].Add([string]$cell.CommitmentId)

@@ -89,6 +89,7 @@ Describe 'Export history' {
 
     Context 'Run selection' {
         It 'Produces identical results with the compiled and PowerShell reducers for <Kind>' -ForEach @(@{ Kind = 'EA' }, @{ Kind = 'MCA' }, @{ Kind = 'FOCUS' }) {
+            $requestedReducer = [string]$env:FINOPS_FORECAST_REDUCER
             $root = New-TestRoot
             $rows = @(
                 New-SyntheticRow -Date '10/01/2026' -Cost '10.12345678' -Workload 'app-alpha'
@@ -109,6 +110,7 @@ Describe 'Export history' {
             $results = foreach ($reducer in 'Compiled', 'PowerShell') {
                 InModuleScope FinOpsForecast -Parameters @{ Settings = $settings; Reducer = $reducer } {
                     $script:ForecastAggregatorReady = $null
+                    $previousReducer = $env:FINOPS_FORECAST_REDUCER
                     $env:FINOPS_FORECAST_REDUCER = if ($Reducer -eq 'PowerShell') { 'PowerShell' } else { $null }
                     try {
                         $source = $Settings.sources[0]
@@ -123,10 +125,11 @@ Describe 'Export history' {
                             Status = $ingested.Status
                         }
                     }
-                    finally { $env:FINOPS_FORECAST_REDUCER = $null; $script:ForecastAggregatorReady = $null }
+                    finally { $env:FINOPS_FORECAST_REDUCER = $previousReducer; $script:ForecastAggregatorReady = $null }
                 }
             }
             $results[0].Compiled | Should -BeTrue
+            [string]$env:FINOPS_FORECAST_REDUCER | Should -BeExactly $requestedReducer
             $results[1].Compiled | Should -BeFalse
             $results[0].Status | Should -Be 'Complete'
             $results[1].Cells | Should -BeExactly $results[0].Cells
@@ -278,7 +281,7 @@ Describe 'Export history' {
             $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root)
             $september = Get-TestMonth $history '2026-09'
             $september.Status | Should -Be 'Complete'
-            $september.Note | Should -Match 'Data ends 11 day\(s\) before month end'
+            $september.Note | Should -Match 'Last charge is dated 11 day\(s\) before month end'
             @($history.Dataset.Issues | Where-Object { $_.Code -eq 'RUN-EARLYEND' -and $_.Severity -eq 'Warn' -and $_.Subject -eq '2026-09' }).Count | Should -Be 1
         }
 
@@ -330,6 +333,115 @@ Describe 'Export history' {
                 Test-ForecastMaterialDifference ([decimal]'-0.5') | Should -BeTrue
                 Test-ForecastMaterialDifference $null | Should -BeFalse
             }
+        }
+    }
+
+    Context 'Manifest identities and date coverage' {
+        It 'Rejects a duplicate partition listed by <Reference>' -ForEach @(
+            @{ Reference = 'the same path'; Alias = $false }
+            @{ Reference = 'a different alias resolving to the same file'; Alias = $true }
+        ) {
+            $root = New-TestRoot
+            $folder = New-SyntheticExportRun -Root $root -Kind 'EA' -Month '2026-10' -Parts @(, @(New-SyntheticRow -Date '10/31/2026' -Cost '100'))
+            $path = Join-Path $folder 'manifest.json'
+            $manifest = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            $duplicate = $manifest.blobs[0] | Select-Object *
+            if ($Alias) { $duplicate.blobName = 'part_0_0001.csv' }
+            $manifest.blobs = @($manifest.blobs[0], $duplicate)
+            $manifest.blobCount = 2
+            $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root)
+            $history.Results[0].Status | Should -Be 'Incomplete'
+            @($history.Results[0].Issues | Where-Object Code -EQ 'RUN-DUPLICATEPARTITION').Count | Should -Be 1
+            $history.Dataset.Months.Count | Should -Be 0
+        }
+
+        It 'Rejects a manifest with <Case> end date' -ForEach @(
+            @{ Case = 'a missing'; End = $null }
+            @{ Case = 'a reversed'; End = '2026-09-30T00:00:00' }
+        ) {
+            $root = New-TestRoot
+            $folder = New-SyntheticExportRun -Root $root -Kind 'EA' -Month '2026-10' -Parts @(, @(New-SyntheticRow -Date '10/31/2026' -Cost '100'))
+            $path = Join-Path $folder 'manifest.json'
+            $manifest = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            $manifest.runInfo.endDate = $End
+            $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root)
+            $history.Results[0].Status | Should -Be 'Incomplete'
+            @($history.Results[0].Issues | Where-Object Code -EQ 'RUN-MANIFEST').Count | Should -Be 1
+        }
+
+        It 'Excludes later dates in the same month and reconciles every input row' {
+            $root = New-TestRoot
+            $rows = @(New-SyntheticRow -Date '10/05/2026' -Cost '100'; New-SyntheticRow -Date '10/20/2026' -Cost '900')
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -Month '2026-10' -RangeEnd ([datetime]'2026-10-10') -Parts @(, $rows)
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root)
+            (Get-TestMonth $history '2026-10').Headline | Should -Be 100
+            $history.Results[0].OutsideRows | Should -Be 1
+            $row = $history.Dataset.Reconciliation[0]
+            $row.Rows | Should -Be 2
+            $row.RawTotal | Should -Be 1000
+            $row.ExcludedOutsideRange | Should -Be 900
+            $row.IncludedHeadline + $row.ExcludedOutsideRange | Should -Be $row.RawTotal
+            $row.Difference | Should -Be 0
+        }
+
+        It 'Includes both range endpoints but excludes earlier and later dates' {
+            $root = New-TestRoot
+            $rows = @(
+                New-SyntheticRow -Date '10/04/2026' -Cost '3'
+                New-SyntheticRow -Date '10/05/2026' -Cost '10'
+                New-SyntheticRow -Date '10/10/2026' -Cost '20'
+                New-SyntheticRow -Date '10/11/2026' -Cost '-40' -ChargeType 'Refund'
+            )
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -Month '2026-10' -RangeStart ([datetime]'2026-10-05') -RangeEnd ([datetime]'2026-10-10') -Parts @(, $rows)
+            $result = (Invoke-TestHistory -Settings (New-TestSettings -Root $root)).Results[0]
+            $result.MonthStats[0].Total | Should -Be 30
+            $result.OutsideRows | Should -Be 2
+            $result.OutsideTotal | Should -Be -37
+        }
+
+        It 'Treats midnight on the next month''s first day as an exclusive end' {
+            $root = New-TestRoot
+            $rows = @(New-SyntheticRow -Date '10/31/2026' -Cost '10'; New-SyntheticRow -Date '11/01/2026' -Cost '20')
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -Month '2026-10' -RangeEnd ([datetime]'2026-11-01') -Parts @(, $rows)
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root)
+            $history.Results[0].Months -join ',' | Should -Be '2026-10'
+            $history.Selection.Selection[0].Coverage | Should -Be 'Full'
+            (Get-TestMonth $history '2026-10').Headline | Should -Be 10
+            $history.Results[0].OutsideTotal | Should -Be 20
+        }
+
+        It 'Keeps manifest coverage through the 20th when <Case>' -ForEach @(
+            @{ Case = 'only the first day has a charge'; Empty = $false; Expected = 100 }
+            @{ Case = 'a verified partition has no charges'; Empty = $true; Expected = 0 }
+        ) {
+            $root = New-TestRoot
+            $rows = @(if (-not $Empty) { New-SyntheticRow -Date '11/01/2026' -Cost '100' })
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -Month '2026-11' -RangeEnd ([datetime]'2026-11-20') -Submitted ([datetime]'2026-11-21') -Parts @(, $rows)
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root)
+            $month = Get-TestMonth $history '2026-11'
+            $month.Status | Should -Be 'Provisional'
+            $month.DataThrough | Should -Be ([datetime]'2026-11-20')
+            $month.Headline | Should -Be $Expected
+        }
+
+        It 'Does not claim future coverage from a full-month range submitted mid-month' {
+            $root = New-TestRoot
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -Month '2026-11' -Submitted ([datetime]'2026-11-10') -Parts @(, @(New-SyntheticRow -Date '11/01/2026' -Cost '100'))
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root)
+            (Get-TestMonth $history '2026-11').DataThrough | Should -Be ([datetime]'2026-11-09')
+        }
+
+        It 'Blocks an aggregate partial month when selected scopes end on different days' {
+            $root = New-TestRoot
+            foreach ($entry in @(@{ Sub = 'A'; End = '2026-11-10' }, @{ Sub = 'B'; End = '2026-11-20' })) {
+                $null = New-SyntheticExportRun -Root $root -Kind 'EA' -Month '2026-11' -ExportName $entry.Sub -Scope "/subscriptions/$($script:SyntheticSubscriptions[$entry.Sub])" -RangeEnd ([datetime]$entry.End) -Submitted ([datetime]'2026-11-21') -Parts @(, @(New-SyntheticRow -Date '11/01/2026' -Subscription $entry.Sub -Cost '100'))
+            }
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root -Subscriptions @('A', 'B'))
+            (Get-TestMonth $history '2026-11').DataThrough | Should -Be ([datetime]'2026-11-10')
+            (Get-TestMonth $history '2026-11').Status | Should -Be 'Incomplete'
+            @($history.Dataset.Issues | Where-Object { $_.Code -eq 'RUN-COVERAGE' -and $_.Severity -eq 'Fail' }).Count | Should -Be 1
         }
     }
 
