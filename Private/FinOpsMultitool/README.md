@@ -4,23 +4,38 @@
 
 Terminal interface for running FinOps scans against Azure subscriptions without GUI dependencies. PowerShell 7 is required.
 
-This standalone preview contains runtime files, not an automated scan test suite or CI workflow. Windows is the documented launch path; native Linux and macOS operation has not been verified for this distribution. See the [distribution README](../../README.md#scope-and-validation) for the local packaging checks performed.
+This standalone preview includes the scan runtime and a separate pre-credit forecasting mode with automated tests. The original scan runtime does not have a standalone automated scan test suite or CI workflow here. Windows is the documented launch path; native Linux and macOS operation has not been verified for this distribution. See the [distribution README](../../README.md#scope-and-validation) for validation details.
 
 NuGet signed-package verification [isn't supported on macOS](https://learn.microsoft.com/dotnet/core/tools/nuget-signed-package-verification#macos). Parquet setup stops with that reason before invoking a package client or downloading packages. Use a configured Kusto endpoint or available CSV exports there. The reader doesn't bypass signature verification to load Parquet.
 
 ## Quick start
 
 ```powershell
-# From the FinOpsMultitool directory
-. .\Invoke-FinOpsMultitool.ps1
-Invoke-FinOpsMultitool
+# From the repository root
+. .\Public\Start-FinOpsExplorer.ps1
+Start-FinOpsExplorer
 ```
 
 Or target a specific subscription:
 
 ```powershell
-Invoke-FinOpsMultitool -SubscriptionId '00000000-0000-0000-0000-000000000000'
+Start-FinOpsExplorer -SubscriptionId '00000000-0000-0000-0000-000000000000'
 ```
+
+The examples below also refer to `Invoke-FinOpsMultitool`, the internal scan runner. Its name and the `Start-FinOpsMultitool` compatibility wrapper remain unchanged for existing scripts.
+
+## Pre-credit forecasting and workload growth
+
+Choose **Pre-credit forecast and workload growth** at the first interactive Explorer prompt, or launch it directly from the repository root:
+
+```powershell
+. .\Public\Start-FinOpsForecast.ps1
+Start-FinOpsForecast -WorkspaceName contoso-fy27
+```
+
+This mode combines actuals to date with the remaining fiscal-year forecast and a sensitivity range. It reads EA, MCA, or FOCUS exports, or reviewed manual inputs, and needs at least twelve complete months. Marketplace and tax are excluded by default; purchases and renewals are scheduled separately. Workload analysis explains changes in the 30-day run rate rather than ranking spend alone.
+
+See the [forecast usage guide](../../docs/forecast.md) for Setup & Review, inputs, and reports, and the [design and integration plan](../../docs/forecast-design.md) for the method, validation checks, tests, and limitations. The data-source instructions below describe the scan workflow, not the forecast's historical ingestion.
 
 ## Requirements
 

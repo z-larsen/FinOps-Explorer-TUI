@@ -16,3 +16,6 @@ produce these files, and nothing here reflects a real tenant.
 Each run writes its own folder on the machine running the tool, under your local
 application data directory. Reports are never uploaded anywhere by FinOps Explorer.
 See [Reports and privacy](../../README.md#reports-and-privacy).
+
+These are scan outputs, not forecast reports. For the separate pre-credit
+forecast and workload-growth outputs, see the [forecast usage guide](../../docs/forecast.md#outputs).

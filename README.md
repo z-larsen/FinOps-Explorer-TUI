@@ -31,10 +31,10 @@ replace their ingestion pipelines or monitor the environment between runs.
 
 ## Download
 
-- [Download the source ZIP](https://github.com/z-larsen/FinOps-Multitool-TUI/archive/refs/heads/main.zip)
+- [Download the source ZIP](https://github.com/z-larsen/FinOps-Explorer-TUI/archive/refs/heads/main.zip)
   and extract it into a **new folder**. GitHub normally names that folder
-  `FinOps-Multitool-TUI-main`.
-- Alternatively, clone `https://github.com/z-larsen/FinOps-Multitool-TUI.git`.
+  `FinOps-Explorer-TUI-main`.
+- Alternatively, clone `https://github.com/z-larsen/FinOps-Explorer-TUI.git`.
 
 No GitHub account is required to download the public source. Keep `Public`,
 `Private`, and `en-US` together with the root files; do not copy just the public
@@ -438,14 +438,14 @@ result; a preview scan is not a substitute for reviewing Azure's source data.
 
 Download [Azure Tool Launcher](https://github.com/z-larsen/AzureToolLauncher)
 and set its local configuration's `FinOpsToolkitRoot` to this extracted folder.
-For sibling folders named `AzureToolLauncher` and `FinOps-Multitool-TUI`:
+For sibling folders named `AzureToolLauncher` and `FinOps-Explorer-TUI`:
 
 ```powershell
-FinOpsToolkitRoot = '..\FinOps-Multitool-TUI'
+FinOpsToolkitRoot = '..\FinOps-Explorer-TUI'
 ```
 
 That setting belongs **inside the launcher's PSD1 configuration**, not at a
-PowerShell prompt. Use `..\FinOps-Multitool-TUI-main` instead if you kept the
+PowerShell prompt. Use `..\FinOps-Explorer-TUI-main` instead if you kept the
 ZIP's original folder name. The launcher recognizes the standalone `Public`
 and `Private` layout as well as the alternative `src\powershell` source layout.
 
