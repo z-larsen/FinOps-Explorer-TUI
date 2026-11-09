@@ -1,0 +1,6 @@
+MatchType,MatchValue,WorkloadId,WorkloadName
+Tag,payments,WL-PAY,Payments platform
+Tag,payments-legacy,WL-PAY,Payments platform
+Tag,analytics,WL-ANL,Analytics
+ResourceGroup,00000000-0000-0000-0000-000000000002/rg-shared-network,WL-NET,Shared networking
+Subscription,00000000-0000-0000-0000-000000000003,WL-SANDBOX,Sandbox subscription

@@ -36,3 +36,14 @@
 !/Private/FinOpsMultitool/modules/*.ps1
 !/Private/FinOpsMultitool/modules/helpers/
 !/Private/FinOpsMultitool/modules/helpers/*.ps1
+!/scripts/Invoke-ForecastTests.ps1
+!/docs/*.md
+!/samples/forecast/
+!/samples/forecast/*.json
+!/samples/forecast/*.csv
+!/Private/FinOpsForecast/
+!/Private/FinOpsForecast/*.ps1
+!/Private/FinOpsForecast/*.psm1
+!/Private/FinOpsForecast/*.cs
+!/Tests/
+!/Tests/*.ps1

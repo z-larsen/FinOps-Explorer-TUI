@@ -26,10 +26,10 @@ param()
 
 function Invoke-FinOpsMultitool {
     # .SYNOPSIS
-    # Runs the private FinOps Multitool terminal interface and creates local reports.
+    # Runs the private FinOps Explorer terminal interface and creates local reports.
     # .DESCRIPTION
     # Uses the existing Azure identity to run read-only analysis within the selected tenant
-    # and subscriptions. Use Start-FinOpsMultitool as the supported public entry point.
+    # and subscriptions. Use Start-FinOpsExplorer as the supported public entry point.
     # .PARAMETER SubscriptionId
     # Selects a subscription in the current tenant. An unresolved ID stops the scan.
     # .PARAMETER OutputPath
@@ -60,7 +60,7 @@ function Invoke-FinOpsMultitool {
     )
 
     if ($PSVersionTable.PSVersion.Major -lt 7) {
-        throw "FinOps Multitool requires PowerShell 7 or later. This session is PowerShell $($PSVersionTable.PSVersion). Open PowerShell 7 with 'pwsh', import the module there, and run the scan again. No scan was started."
+        throw "FinOps Explorer TUI requires PowerShell 7 or later. This session is PowerShell $($PSVersionTable.PSVersion). Open PowerShell 7 with 'pwsh', import the module there, and run the scan again. No scan was started."
     }
 
     . (Join-Path $PSScriptRoot '../Get-VersionNumber.ps1')
@@ -518,11 +518,9 @@ function Invoke-FinOpsMultitool {
                 $choice = Read-FinOpsAnswer '  Select [1/2/3/4]: '
                 switch ($choice) {
                     '1' {
-                        # The [1] Hub choice uses the scalable Kusto engine when the
-                        # hub has an ADX/Fabric cluster (auto-discovered) or
-                        # FINOPS_HUB_KUSTO_URI is set (ftklocal). If neither exists,
-                        # cost scans fall back to the STORAGE READER, which loads cost
-                        # rows into PowerShell.
+                        # The [1] Hub choice uses the scalable Kusto engine when
+                        # FINOPS_HUB_KUSTO_URI is set. If it is not set, cost scans use
+                        # the STORAGE READER, which loads cost rows into PowerShell.
                         $hubSubIds = @($Subscriptions | ForEach-Object { $_.Id })
                         $prov = $null
                         try { $prov = Resolve-FOHubProvider -Subscriptions $hubSubIds } catch {
@@ -571,7 +569,7 @@ function Invoke-FinOpsMultitool {
                             # path so it is never mistaken for the scalable engine.
                             Write-FinOpsConsole ""
                             Write-FinOpsConsole "  Using the FinOps Hub storage reader (small-dataset path; $($hubSize.Display))." -ForegroundColor DarkGray
-                            Write-FinOpsConsole "  Larger hubs should query Kusto: deploy ADX/Fabric, or set FINOPS_HUB_KUSTO_URI (ftklocal)." -ForegroundColor DarkGray
+                            Write-FinOpsConsole "  Larger hubs should query Kusto: set FINOPS_HUB_KUSTO_URI to the hub Kusto endpoint (ADX, Fabric, or a local emulator)." -ForegroundColor DarkGray
                             return @{ Source = 'Hub'; HubStorage = $hubStorage; HubProviderResolved = $true }
                         }
 
@@ -583,8 +581,8 @@ function Invoke-FinOpsMultitool {
                         Write-FinOpsConsole "  Cost scans will use the storage reader, which loads cost rows into" -ForegroundColor DarkGray
                         Write-FinOpsConsole "  memory. On a large hub (tens of GB) this can be slow or run out of" -ForegroundColor DarkGray
                         Write-FinOpsConsole "  memory before completing." -ForegroundColor DarkGray
-                        Write-FinOpsConsole "  For the scalable engine path: deploy ADX/Fabric on the hub, or set" -ForegroundColor DarkGray
-                        Write-FinOpsConsole "  FINOPS_HUB_KUSTO_URI to a local ftklocal emulator, then re-run." -ForegroundColor DarkGray
+                        Write-FinOpsConsole "  For the scalable engine path: set FINOPS_HUB_KUSTO_URI to the hub" -ForegroundColor DarkGray
+                        Write-FinOpsConsole "  Kusto endpoint (ADX, Fabric, or a local emulator), then re-run." -ForegroundColor DarkGray
                         Write-FinOpsConsole ""
                         Write-FinOpsConsole "  Switch to the live Cost Management API instead? " -ForegroundColor White -NoNewline
                         Write-FinOpsConsole "(N = continue with the storage reader)" -ForegroundColor DarkGray
@@ -1051,12 +1049,11 @@ function Invoke-FinOpsMultitool {
         $hubCostByTag = $null
         $hubScanErrors = @{}
 
-        # Scalable Kusto path: when a FinOps Hub Kusto database is reachable
-        # (a FINOPS_HUB_KUSTO_URI override for an ftklocal emulator or a pinned
-        # cluster, or a discovered ADX/Fabric cluster), push aggregation into
-        # the engine and return only summaries - never load raw rows. This is
-        # what lets the tool scale to large hub datasets. Falls back to the
-        # storage reader below when no cluster is available.
+        # Scalable Kusto path: when FINOPS_HUB_KUSTO_URI configures a FinOps Hub
+        # Kusto database (an ftklocal emulator or a pinned cluster), push
+        # aggregation into the engine and return only summaries - never load raw
+        # rows. This is what lets the tool scale to large hub datasets. Uses the
+        # storage reader below when no endpoint is configured.
         $kustoProvider = $null
         $subIdsForDisco = @($Subscriptions | ForEach-Object { $_.Id })
         if ($DataSource.Source -eq 'Hub') {
@@ -1127,7 +1124,7 @@ function Invoke-FinOpsMultitool {
             $hub = $DataSource.HubStorage
             Write-FinOpsConsole ""
             Write-FinOpsConsole "  Loading cost data from FinOps Hub storage (small-dataset reader)..." -ForegroundColor Green
-            Write-FinOpsConsole "  For large hubs, query the Kusto database instead (ADX/Fabric, or set FINOPS_HUB_KUSTO_URI for ftklocal)." -ForegroundColor DarkGray
+            Write-FinOpsConsole "  For large hubs, query Kusto: set FINOPS_HUB_KUSTO_URI to the hub Kusto endpoint (ADX, Fabric, or a local emulator)." -ForegroundColor DarkGray
             try {
                 $hubRaw = Read-FinOpsHubData -StorageAccountName $hub.name -ResourceGroupName $hub.resourceGroup -Months 1 -SubscriptionIds $subIdsForDisco
             }
@@ -1731,7 +1728,7 @@ function Invoke-FinOpsMultitool {
         if ([string]::IsNullOrWhiteSpace($localData)) {
             throw 'Local application data is unavailable. Specify a local OutputPath outside any Git repository.'
         }
-        return (Join-Path $localData 'FinOpsToolkit/Multitool/Reports')
+        return (Join-Path $localData 'FinOpsToolkit/Explorer/Reports')
     }
 
     function Assert-FinOpsReportPath {
@@ -1916,13 +1913,11 @@ function Invoke-FinOpsMultitool {
         Write-SectionHeader 'SCAN COMPLETE'
         Write-FinOpsConsole ""
 
-        $totalFindings = 0
         foreach ($mod in ($Modules | Where-Object { $_.Selected })) {
             $data = $Results[$mod.Fn]
             $errorKey = "_error_$($mod.Fn)"
             $hasError = $Results.ContainsKey($errorKey)
             $count = if ($data) { @($data).Count } else { 0 }
-            $totalFindings += $count
             if ($hasError) {
                 $icon = '!'
                 $color = 'Red'
@@ -1931,18 +1926,16 @@ function Invoke-FinOpsMultitool {
             elseif ($count -gt 0) {
                 $icon = '*'
                 $color = 'Yellow'
-                $suffix = "$count findings"
+                $suffix = 'result returned'
             }
             else {
                 $icon = '-'
                 $color = 'DarkGray'
-                $suffix = '0 findings'
+                $suffix = 'no data'
             }
             Write-FinOpsConsole "  $icon $($mod.Name.PadRight(30)) $suffix" -ForegroundColor $color
         }
 
-        Write-FinOpsConsole ""
-        Write-FinOpsConsole "  Total findings: $totalFindings" -ForegroundColor White
         Write-FinOpsConsole ""
 
         # -- Display results per module ------------------------------------
@@ -2047,6 +2040,7 @@ function Invoke-FinOpsMultitool {
                     }
                 }
                 'Get-AHBOpportunities' {
+                    if ($data.Note) { Write-FinOpsConsole "    $($data.Note)" -ForegroundColor Yellow }
                     $rows = @()
                     if ($data.WindowsVMs) {
                         $rows += @($data.WindowsVMs) | ForEach-Object {
@@ -2070,27 +2064,40 @@ function Invoke-FinOpsMultitool {
                     if ($data.AccessDenied) {
                         Show-PermissionReadout -Fn 'Get-ReservationAdvice' -PermissionInfo $permissionInfo -Activity 'Advisor / reservation recommendations'
                     }
-                    else {
-                        $rows = $data.AdvisorRecommendations | ForEach-Object {
-                            $resLabel = if ($_.Subscription -and $_.Subscription -ne $_.SubscriptionId) { $_.Subscription }
-                            elseif ($_.Solution) { $_.Solution.Substring(0, [math]::Min(50, $_.Solution.Length)) }
-                            else { ($_.ResourceName -split '/')[-1] }
-                            # Console width is tight once SKU/Region/Qty are shown.
-                            if ($resLabel.Length -gt 22) { $resLabel = $resLabel.Substring(0, 21) + [char]0x2026 }
+                    $rows = @(
+                        $data.AdvisorRecommendations | Where-Object { $_ } | ForEach-Object {
                             [PSCustomObject]@{
-                                Resource = $resLabel
+                                Source   = 'Advisor'
+                                Resource = $_.ResourceName
                                 Type     = ($_.ResourceType -split '/')[-1]
                                 SKU      = $_.SKU
                                 Region   = $_.Region
                                 Qty      = $_.Qty
                                 Term     = $_.Term
                                 Savings  = Format-BudgetAmount -Value $_.AnnualSavings -Currency $_.Currency
-                                Impact   = $_.Impact
+                                Period   = 'Annual'
                             }
                         }
-                        $cols = @('Resource', 'Type', 'SKU', 'Region', 'Qty', 'Term', 'Savings', 'Impact')
-                        Write-ColorizedLine -Text "    Est. annual savings: $(Format-BudgetAmount -Value $data.EstimatedAnnualSavings -Currency $data.Currency)" -DefaultColor 'White'
-                        if ($data.CostIssue) { Write-FinOpsConsole "    $($data.CostIssue)" -ForegroundColor Yellow }
+                        $data.ReservationRecommendations | Where-Object { $_ } | ForEach-Object {
+                            [PSCustomObject]@{
+                                Source   = 'Consumption'
+                                Resource = $_.Subscription
+                                Type     = $_.ResourceType
+                                SKU      = $_.SKU
+                                Region   = $_.Region
+                                Qty      = $_.RecommendedQty
+                                Term     = $_.Term
+                                Savings  = Format-BudgetAmount -Value $_.NetSavings -Currency $(if ($_.Currency -and $_.Currency -ne 'Unknown') { $_.Currency } else { 'Unknown currency' })
+                                Period   = "Lookback: $($_.LookBackPeriod)"
+                            }
+                        }
+                    )
+                    $cols = @('Source', 'Resource', 'Type', 'SKU', 'Region', 'Qty', 'Term', 'Savings', 'Period')
+                    Write-ColorizedLine -Text "    Est. annual savings: $(Format-BudgetAmount -Value $data.EstimatedAnnualSavings -Currency $data.Currency)" -DefaultColor 'White'
+                    if ($data.CostIssue) { Write-FinOpsConsole "    $($data.CostIssue)" -ForegroundColor Yellow }
+                    if ($data.Note) { Write-FinOpsConsole "    $($data.Note)" -ForegroundColor Yellow }
+                    foreach ($recommendation in @($data.AdvisorRecommendations | Where-Object { $_.ResourceId })) {
+                        Write-FinOpsConsole "    Advisor resource $($recommendation.ResourceName): $($recommendation.ResourceId)" -ForegroundColor DarkGray
                     }
                 }
                 'Get-CommitmentUtilization' {
@@ -2441,7 +2448,7 @@ function Invoke-FinOpsMultitool {
                 'Get-UnitEconomics' {
                     $computeShare = if ($null -ne $data.ComputeSharePct) { "$($data.ComputeSharePct)% of VM compute + storage spend" } else { 'Unavailable' }
                     $storageShare = if ($null -ne $data.StorageSharePct) { "$($data.StorageSharePct)% of VM compute + storage spend" } else { 'Unavailable' }
-                    Write-ColorizedLine -Text "    Compute: $(Format-BudgetAmount -Value $data.ComputeCost -Currency $data.Currency) ($computeShare) over $($data.VmCount) VMs / $($data.TotalVCpu) vCPU / $($data.TotalMemoryGb) GB RAM" -DefaultColor 'White'
+                    Write-ColorizedLine -Text "    Compute: $(Format-BudgetAmount -Value $data.ComputeCost -Currency $data.Currency) ($computeShare) over $($data.VmCount) VMs / $($data.TotalVCpu) vCPU / $(if ($null -eq $data.TotalMemoryGb) { 'RAM unavailable' } else { "$($data.TotalMemoryGb) GB RAM" })" -DefaultColor 'White'
                     Write-ColorizedLine -Text "    Storage: $(Format-BudgetAmount -Value $data.StorageCost -Currency $data.Currency) ($storageShare) over $($data.TotalStorageGb) GB ($($data.DiskGb) GB disk + $($data.BlobFileGb) GB blob/file)" -DefaultColor 'White'
                     $unitContext = Get-FinOpsUnitCostContext -Data $data
                     Write-FinOpsConsole "    $($unitContext.Summary)" -ForegroundColor DarkGray
@@ -2664,15 +2671,14 @@ function Invoke-FinOpsMultitool {
                     $ahbCount = if ($rows) { @($rows).Count } else { 0 }
                     if ($ahbCount -gt 5) {
                         $guidanceItems = @(
-                            @{ Severity = 'Red'; Message = "$ahbCount resources eligible for Azure Hybrid Benefit — up to 40% savings on Windows, 55% on SQL licensing." }
-                            @{ Severity = 'Red'; Message = "FinOps Action: AHB is one of the highest-impact, lowest-effort optimizations. Apply to all eligible VMs and SQL resources." }
-                            @{ Severity = 'Yellow'; Message = "Requires Software Assurance or qualifying subscription licenses. Check with your licensing team."; Docs = 'https://learn.microsoft.com/azure/virtual-machines/windows/hybrid-use-benefit-licensing' }
+                            @{ Severity = 'Yellow'; Message = "$ahbCount configuration candidates for Azure Hybrid Benefit. This scan does not verify license entitlement." }
+                            @{ Severity = 'Yellow'; Message = 'Verify qualifying licenses, available entitlement, and service eligibility with your licensing team before enabling the benefit.'; Docs = 'https://learn.microsoft.com/azure/virtual-machines/windows/hybrid-use-benefit-licensing' }
                         )
                     }
                     elseif ($ahbCount -gt 0) {
                         $guidanceItems = @(
-                            @{ Severity = 'Yellow'; Message = "$ahbCount resources can use Azure Hybrid Benefit (up to 40% Windows / 55% SQL savings)." }
-                            @{ Severity = 'Yellow'; Message = "Requires Software Assurance. Low effort to apply — high cost impact."; Docs = 'https://learn.microsoft.com/azure/virtual-machines/windows/hybrid-use-benefit-licensing' }
+                            @{ Severity = 'Yellow'; Message = "$ahbCount configuration candidates for Azure Hybrid Benefit. This scan does not verify license entitlement." }
+                            @{ Severity = 'Yellow'; Message = 'Verify qualifying licenses, available entitlement, and service eligibility with your licensing team before enabling the benefit.'; Docs = 'https://learn.microsoft.com/azure/virtual-machines/windows/hybrid-use-benefit-licensing' }
                         )
                     }
                 }
@@ -2863,38 +2869,19 @@ function Invoke-FinOpsMultitool {
                     }
                 }
                 'Get-ReservationAdvice' {
-                    if ($data.CostIssue) {
-                        $guidanceItems = @(@{ Severity = 'Yellow'; Message = [string]$data.CostIssue })
-                    }
-                    elseif ($data.AdvisorRecommendations -and @($data.AdvisorRecommendations).Count -gt 0) {
-                        $totalSavings = if ($data.EstimatedAnnualSavings) { $data.EstimatedAnnualSavings } else { 0 }
-                        if ($totalSavings -gt 10000) {
-                            $guidanceItems = @(
-                                @{ Severity = 'Red'; Message = "Estimated reservation savings: $(Format-BudgetAmount -Value $data.EstimatedAnnualSavings -Currency $data.Currency)/year." }
-                                @{ Severity = 'Red'; Message = "FinOps Principle: Commitment-based discounts (RIs, Savings Plans) are the single largest cost lever — typically 30-60% savings." }
-                                @{ Severity = 'Yellow'; Message = "Start with 1-year terms for flexibility. Use shared scope to maximize utilization across subscriptions." }
-                                @{ Severity = 'Yellow'; Message = "Review 14-day usage trends before purchasing to ensure steady-state workloads."; Docs = 'https://learn.microsoft.com/azure/cost-management-billing/reservations/save-compute-costs-reservations' }
-                            )
-                        }
-                        else {
-                            $guidanceItems = @(
-                                @{ Severity = 'Yellow'; Message = "Estimated reservation savings: $(Format-BudgetAmount -Value $data.EstimatedAnnualSavings -Currency $data.Currency)/year. Review the individual recommendations for steady-state workloads." }
-                                @{ Severity = 'Yellow'; Message = "Start with 1-year terms. Use shared scope for best utilization."; Docs = 'https://learn.microsoft.com/azure/cost-management-billing/reservations/save-compute-costs-reservations' }
-                            )
-                        }
+                    $advisorCount = @($data.AdvisorRecommendations | Where-Object { $_ }).Count
+                    $purchaseCount = @($data.ReservationRecommendations | Where-Object { $_ }).Count
+                    $guidanceItems = @()
+                    if ($advisorCount + $purchaseCount -gt 0) {
+                        $guidanceItems += @{ Severity = 'Yellow'; Message = "$advisorCount Advisor and $purchaseCount reservation purchase recommendations returned. Compare terms, scope, and steady-state usage before purchasing. Advisor and Consumption can describe overlapping opportunities; do not add their estimates."; Docs = 'https://learn.microsoft.com/azure/cost-management-billing/reservations/save-compute-costs-reservations' }
                     }
                     else {
-                        if ($data.AccessDenied) {
-                            $guidanceItems = @(
-                                @{ Severity = 'Red'; Message = "Access denied reading Advisor / reservation recommendations — results are blocked, not empty." }
-                                @{ Severity = 'Yellow'; Message = "Required role: $($permissionInfo['Get-ReservationAdvice'].Role) at $($permissionInfo['Get-ReservationAdvice'].Scope) scope. Ask a billing/subscription admin to assign it, then re-scan."; Docs = 'https://learn.microsoft.com/azure/cost-management-billing/reservations/save-compute-costs-reservations' }
-                            )
-                        }
-                        else {
-                            $guidanceItems = @(
-                                @{ Severity = 'Green'; Message = "No reservation recommendations. Current commitment coverage appears sufficient." }
-                            )
-                        }
+                        $guidanceItems += @{ Severity = 'Yellow'; Message = 'No recommendation rows were returned. This does not establish sufficient commitment coverage.' }
+                    }
+                    if ($data.CostIssue) { $guidanceItems += @{ Severity = 'Yellow'; Message = [string]$data.CostIssue } }
+                    if ($data.AccessDenied) { $guidanceItems += @{ Severity = 'Red'; Message = 'Access was denied for some Advisor or reservation reads. Returned recommendations do not cover every requested source.' } }
+                    if ($data.CoverageIncomplete -or $null -eq $data.CoverageIncomplete) {
+                        $guidanceItems += @{ Severity = 'Yellow'; Message = $(if ($data.Note) { [string]$data.Note } else { 'Recommendation coverage is not verified; missing data is not sufficient coverage.' }) }
                     }
                 }
                 'Get-CommitmentUtilization' {
@@ -3214,7 +3201,7 @@ function Invoke-FinOpsMultitool {
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FinOps Multitool Report $reportVersion &mdash; $timestamp</title>
+<title>FinOps Explorer TUI Report $reportVersion &mdash; $timestamp</title>
 <style>
 :root {
   --energy-blue: #0000B3; --blue: #0078D4; --navy: #0D0061; --deep-blue: #000085;
@@ -3433,7 +3420,7 @@ h2[id] { scroll-margin-top: 85px; }
 <body>
 <div class="masthead">
 <div class="eyebrow">FinOps Toolkit</div>
-<h1>FinOps Multitool report</h1>
+<h1>FinOps Explorer TUI report</h1>
 <p class="meta">Version: $reportVersion &nbsp;|&nbsp; Generated: $timestamp &nbsp;|&nbsp; Subscriptions: $([System.Net.WebUtility]::HtmlEncode($headerScope))$(if ($DataSourceLabel) { " &nbsp;|&nbsp; Cost data: $([System.Net.WebUtility]::HtmlEncode($DataSourceLabel))" })</p>
 </div>
 <div class="wrap">
@@ -3816,6 +3803,7 @@ h2[id] { scroll-margin-top: 85px; }
                         $htmlCols = @('StorageAccount', 'ResourceGroup', 'CurrentTier', 'CapacityGB', 'Recommendation')
                     }
                     'Get-AHBOpportunities' {
+                        if ($data.Note) { [void]$notesSb.Append("<p>$([System.Net.WebUtility]::HtmlEncode([string]$data.Note))</p>") }
                         $ahbRows = @()
                         if ($data.WindowsVMs) { $ahbRows += @($data.WindowsVMs) | ForEach-Object { $est = if ($null -ne $_.estMonthlySavings) { "$(Format-BudgetAmount -Value $_.estMonthlySavings -Currency $data.SavingsCurrency)/mo" } else { 'n/a' }; [PSCustomObject]@{ Type = 'Windows VM'; Name = $_.name; ResourceGroup = $_.resourceGroup; Size = $_.vmSize; License = $_.currentLicense; 'Est Savings' = $est } } }
                         if ($data.SQLVMs) { $ahbRows += @($data.SQLVMs) | ForEach-Object { [PSCustomObject]@{ Type = 'SQL VM'; Name = $_.name; ResourceGroup = $_.resourceGroup; Size = $_.sqlEdition; License = $_.currentLicense; 'Est Savings' = '-' } } }
@@ -3991,21 +3979,22 @@ h2[id] { scroll-margin-top: 85px; }
                             [void]$htmlSb.Append((ConvertTo-ReportTableControlHtml -TableId 'table-reservation-purchases' -Title 'reservation purchase detail' -RowCount $rrRows.Count))
                             # The report script only turns table.report-table into a scrolling, pageable grid.
                             [void]$htmlSb.Append('<div class="table-scroll"><table class="report-table table-reservation-purchases" id="table-reservation-purchases"><thead><tr>')
-                            foreach ($c in @('SKU', 'Resource type', 'Region', 'Qty', 'Term', 'Lookback', 'Cost without RI', 'Cost with RI', 'Net savings')) {
+                            foreach ($c in @('Subscription', 'SKU', 'Resource type', 'Region', 'Qty', 'Term', 'Lookback', 'Cost without RI', 'Cost with RI', 'Net savings')) {
                                 [void]$htmlSb.Append("<th scope=`"col`">$([System.Net.WebUtility]::HtmlEncode($c))</th>")
                             }
                             [void]$htmlSb.Append('</tr></thead><tbody>')
                             foreach ($rr in $rrRows) {
                                 $cells = @(
+                                    [string]$rr.Subscription
                                     [string]$rr.SKU
                                     [string]$rr.ResourceType
                                     [string]$rr.Region
                                     [string]$rr.RecommendedQty
                                     [string]$rr.Term
                                     [string]$rr.LookBackPeriod
-                                    $(if ($null -ne $rr.CostWithoutRI) { '{0:N2}' -f [double]$rr.CostWithoutRI } else { '-' })
-                                    $(if ($null -ne $rr.CostWithRI) { '{0:N2}' -f [double]$rr.CostWithRI } else { '-' })
-                                    $(if ($null -ne $rr.NetSavings) { '{0:N2}' -f [double]$rr.NetSavings } else { '-' })
+                                    (Format-BudgetAmount -Value $rr.CostWithoutRI -Currency $(if ($rr.CostWithoutRICurrency -and $rr.CostWithoutRICurrency -ne 'Unknown') { $rr.CostWithoutRICurrency } else { 'Unknown currency' }))
+                                    (Format-BudgetAmount -Value $rr.CostWithRI -Currency $(if ($rr.CostWithRICurrency -and $rr.CostWithRICurrency -ne 'Unknown') { $rr.CostWithRICurrency } else { 'Unknown currency' }))
+                                    (Format-BudgetAmount -Value $rr.NetSavings -Currency $(if ($rr.Currency -and $rr.Currency -ne 'Unknown') { $rr.Currency } else { 'Unknown currency' }))
                                 )
                                 [void]$htmlSb.Append('<tr>')
                                 for ($ci = 0; $ci -lt $cells.Count; $ci++) {
@@ -4016,13 +4005,16 @@ h2[id] { scroll-margin-top: 85px; }
                                 [void]$htmlSb.Append('</tr>')
                             }
                             [void]$htmlSb.Append('</tbody></table></div>')
-                            [void]$htmlSb.Append('<p class="table-note">From the Consumption reservation recommendation API at single-subscription scope over the last 30 days, queried per resource type. Costs are modeled over the lookback window and the API does not return a currency.</p>')
+                            [void]$htmlSb.Append('<p class="table-note">From the Consumption reservation recommendation API at single-subscription scope, queried per resource type with a 30-day lookback filter. Each row retains its returned lookback and commitment term. Amounts model the lookback period, not annual savings or the full commitment price. Modern amounts retain their currencies; legacy amounts without currency are labeled unknown. Terms and Advisor recommendations can overlap; do not add these options.</p>')
                             [void]$htmlSb.Append('<h3>Advisor recommendations</h3>')
                         }
 
                         $htmlRows = $data.AdvisorRecommendations | ForEach-Object {
                             [PSCustomObject]@{
                                 Resource = ($_.ResourceName -split '/')[-1]
+                                ResourceName = $_.ResourceName
+                                ResourcePath = $_.ResourceId
+                                Subscription = $_.Subscription
                                 Type     = ($_.ResourceType -split '/')[-1]
                                 SKU      = $_.SKU
                                 Region   = $_.Region
@@ -4032,7 +4024,8 @@ h2[id] { scroll-margin-top: 85px; }
                                 Impact   = $_.Impact
                             }
                         }
-                        $htmlCols = @('Resource', 'Type', 'SKU', 'Region', 'Qty', 'Term', 'Savings', 'Impact')
+                        $htmlCols = @('Subscription', 'Resource', 'Type', 'SKU', 'Region', 'Qty', 'Term', 'Savings', 'Impact')
+                        $tableNote = @($tableNote; 'Advisor savings are annual estimates. Compare individual commitment options before purchasing; alternative terms and savings plans can overlap.') -join ' '
                     }
                     'Get-CommitmentUtilization' {
                         [void]$notesSb.Append("<p>Reservations: $($data.RICount) (average $(Format-ReportMetric $data.RIAvgUtilization -Format '0.#' -Suffix '%')) &nbsp;|&nbsp; Savings plans: $($data.SPCount) (average $(Format-ReportMetric $data.SPAvgUtilization -Format '0.#' -Suffix '%'))</p>")
@@ -4057,7 +4050,7 @@ h2[id] { scroll-margin-top: 85px; }
                         [void]$notesSb.Append("<p>AHB: <span class=`"money`">$([System.Net.WebUtility]::HtmlEncode((Format-BudgetAmount -Value $data.AHBSavingsMonthly -Currency $data.AHBCurrency)))</span> ($([System.Net.WebUtility]::HtmlEncode([string]$data.AHBPeriod)))</p>")
                         if ($data.AHBIssue) { [void]$notesSb.Append("<p>$([System.Net.WebUtility]::HtmlEncode([string]$data.AHBIssue))</p>") }
                         if ($data.CoverageIncomplete -and $data.Note) { [void]$notesSb.Append("<p class=`"guidance yellow`">$([System.Net.WebUtility]::HtmlEncode([string]$data.Note))</p>") }
-                        if ($data.EstimateBasis) { $tableNote = [string]$data.EstimateBasis }
+                        if ($data.EstimateBasis) { [void]$notesSb.Append("<p class=`"story-note`">$([System.Net.WebUtility]::HtmlEncode([string]$data.EstimateBasis))</p>") }
                     }
                     'Get-BudgetStatus' {
                         $htmlCoverage = if ($data.CoverageIncomplete) {
@@ -4152,7 +4145,7 @@ h2[id] { scroll-margin-top: 85px; }
                         $storageAmount = [System.Net.WebUtility]::HtmlEncode((Format-BudgetAmount -Value $data.StorageCost -Currency $data.Currency))
                         $computeShare = if ($null -ne $data.ComputeSharePct) { [System.Net.WebUtility]::HtmlEncode("$($data.ComputeSharePct)% of VM compute + storage spend") } else { 'Unavailable' }
                         $storageShare = if ($null -ne $data.StorageSharePct) { [System.Net.WebUtility]::HtmlEncode("$($data.StorageSharePct)% of VM compute + storage spend") } else { 'Unavailable' }
-                        [void]$notesSb.Append("<p>Compute: $computeAmount ($computeShare) over $($data.VmCount) VMs, $($data.TotalVCpu) vCPU, $($data.TotalMemoryGb) GB RAM</p>")
+                        [void]$notesSb.Append("<p>Compute: $computeAmount ($computeShare) over $($data.VmCount) VMs, $($data.TotalVCpu) vCPU, $(if ($null -eq $data.TotalMemoryGb) { 'RAM unavailable' } else { "$($data.TotalMemoryGb) GB RAM" })</p>")
                         [void]$notesSb.Append("<p>Storage: $storageAmount ($storageShare) over $($data.TotalStorageGb) GB</p>")
                         $unitContext = Get-FinOpsUnitCostContext -Data $data
                         [void]$notesSb.Append("<p class=`"story-note`">$([System.Net.WebUtility]::HtmlEncode($unitContext.Summary))</p>")
@@ -4270,7 +4263,7 @@ h2[id] { scroll-margin-top: 85px; }
                             }
                             $cellClass = if ($c -in @('Resources', 'Values', 'Cost', 'Actual', 'Forecast', 'Amount', 'Spent', 'PctUsed', 'AvgCPU14d', 'AvgUtil', 'MinUtil', 'PromptTokens', 'GeneratedTokens', 'TotalTokens', 'PctOfTokens', 'Input tokens', 'Output tokens', 'Total tokens', 'Token share', 'Avg utilization')) { ' class="numeric-cell"' } else { '' }
                             [void]$htmlSb.Append("<td$cellClass>")
-                            if ($fn -eq 'Get-ResourceCosts' -and $c -eq 'Resource') {
+                            if ($fn -in @('Get-ResourceCosts', 'Get-ReservationAdvice') -and $c -eq 'Resource') {
                                 [void]$htmlSb.Append((ConvertTo-ResourceIdentityHtml -Resource $r))
                             }
                             elseif (($fn -eq 'Get-CommitmentUtilization' -and $c -eq 'Commitment') -or ($fn -eq 'Get-AIWorkloadMetrics' -and $c -eq 'Account' -and $r.ResourcePath)) {
@@ -4355,7 +4348,7 @@ h2[id] { scroll-margin-top: 85px; }
             }
 
             if ($null -ne $currentCat) { [void]$htmlSb.Append('</section>') }
-            [void]$htmlSb.Append('<div class="footer">Generated by FinOps Multitool &mdash; part of the <a href="https://aka.ms/finops/toolkit">FinOps Toolkit</a></div>')
+            [void]$htmlSb.Append('<div class="footer">Generated by FinOps Explorer TUI &mdash; part of the <a href="https://aka.ms/finops/toolkit">FinOps Toolkit</a></div>')
             [void]$htmlSb.Append('</div>')
             [void]$htmlSb.Append(@'
 <script>
@@ -4656,10 +4649,9 @@ h2[id] { scroll-margin-top: 85px; }
 
             # Summary text file
             $summaryLines = @(
-                "FinOps Multitool Scan Summary"
+                "FinOps Explorer TUI Scan Summary"
                 "Generated: $timestamp"
                 "Subscriptions: $subList"
-                "Total findings: $totalFindings"
                 if ($kpiReferenceIssue) { $kpiReferenceIssue }
                 ""
             )
@@ -4676,7 +4668,7 @@ h2[id] { scroll-margin-top: 85px; }
                     $summaryData.AccessDenied -contains $true -or @(@($summaryData.CostIssue; $summaryData.RateIssue; $summaryData.AHBIssue; $summaryData.Error) | Where-Object { $_ }).Count -gt 0 -or
                     @($summaryData.MetricFailures | Where-Object { $_ -gt 0 }).Count -gt 0) { "Limited data: $(if ($summaryNote) { $summaryNote } else { 'Some evidence could not be verified.' })" }
                 elseif ($count -eq 0) { 'No data' }
-                else { "$count findings" }
+                else { 'Result returned' }
                 $summaryLines += "$($mod.Name): $status"
             }
             Write-FinOpsReportFile -Directory $exportDir -Name 'ScanSummary.txt' -Lines $summaryLines -ErrorAction Stop
@@ -4706,6 +4698,16 @@ h2[id] { scroll-margin-top: 85px; }
     #  MAIN FLOW
     # =====================================================================
     Show-Banner
+
+    # Standalone forecast: offer the pre-credit forecast before the scan workflow.
+    $forecastModule = Join-Path $PSScriptRoot '../FinOpsForecast/FinOpsForecast.psm1'
+    if (-not $NonInteractive -and -not $Scans -and -not $DataSource -and (Test-Path -LiteralPath $forecastModule)) {
+        Import-Module $forecastModule -Force
+        if ((Select-FinOpsExplorerMode -Accessible:$Accessible) -eq 'Forecast') {
+            Invoke-FinOpsForecast -OutputPath $OutputPath -Accessible:$Accessible
+            return
+        }
+    }
 
     # Step 1: Connect & pick subscription
     $subs = Select-Subscription -PreselectedId $SubscriptionId

@@ -1,9 +1,9 @@
 <!-- markdownlint-disable -->
-# FinOps Multitool TUI
+# FinOps Explorer TUI
 
-An **unofficial, standalone preview snapshot** of the FinOps Multitool terminal
+An **unofficial, standalone preview snapshot** of the FinOps Explorer terminal
 UI. Download it to run interactive FinOps scans against Azure subscriptions.
-This is not an official Microsoft release or the older WPF Multitool.
+This is not an official Microsoft release.
 
 The runtime uses the **v15.0-dev-wip.20261001.1** version label. Preview status does not
 imply production support or complete live-data validation. This repository
@@ -18,22 +18,23 @@ replace their ingestion pipelines or monitor the environment between runs.
 - [Choose your cost data source](#choose-your-cost-data-source)
 - [Run a scan from start to finish](#run-a-scan-from-start-to-finish)
 - [Review and share the results](#review-and-share-the-results)
-- [Use the Multitool with Fabric](#use-the-multitool-with-fabric)
+- [Use FinOps Explorer with Fabric](#use-finops-explorer-with-fabric)
+- [Forecast pre-credit cost and workload growth](#forecast-pre-credit-cost-and-workload-growth)
 
 ## Startup screen
 
-![FinOps Multitool TUI startup and tenant picker with fictional account and tenant details.](docs/images/finops-multitool-startup.png)
+![FinOps Explorer TUI startup and tenant picker with fictional account and tenant details.](docs/images/finops-multitool-startup.png)
 
 ## Workflow
 
-![FinOps Multitool workflow: authenticate, set scope, choose a data source, collect read-only scan results, interpret findings, and export reports locally.](docs/images/finops-multitool-workflow.png)
+![FinOps Explorer workflow: authenticate, set scope, choose a data source, collect read-only scan results, interpret findings, and export reports locally.](docs/images/finops-multitool-workflow.png)
 
 ## Download
 
-- [Download the source ZIP](https://github.com/z-larsen/FinOps-Multitool-TUI/archive/refs/heads/main.zip)
+- [Download the source ZIP](https://github.com/z-larsen/FinOps-Explorer-TUI/archive/refs/heads/main.zip)
   and extract it into a **new folder**. GitHub normally names that folder
-  `FinOps-Multitool-TUI-main`.
-- Alternatively, clone `https://github.com/z-larsen/FinOps-Multitool-TUI.git`.
+  `FinOps-Explorer-TUI-main`.
+- Alternatively, clone `https://github.com/z-larsen/FinOps-Explorer-TUI.git`.
 
 No GitHub account is required to download the public source. Keep `Public`,
 `Private`, and `en-US` together with the root files; do not copy just the public
@@ -48,7 +49,7 @@ entry-point script.
 - Azure sign-in and appropriate access to the scope being scanned. Reader is a
   starting point; billing, cost, storage export, and hub data can require
   additional permissions. See the
-  [Multitool documentation](Private/FinOpsMultitool/README.md) for details.
+  [FinOps Explorer documentation](Private/FinOpsMultitool/README.md) for details.
 - Network access to Azure and any data-source/dependency endpoints used by your
   selections. This is not an offline scanner.
 
@@ -71,14 +72,15 @@ Load the public entry point, then call the function:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-. .\Public\Start-FinOpsMultitool.ps1
-Start-FinOpsMultitool
+. .\Public\Start-FinOpsExplorer.ps1
+Start-FinOpsExplorer
 ```
 
 Running the public file with `-File` alone only defines the function; it does
 **not** open the TUI. Interactive startup handles authentication and lets you
 select subscriptions, data sources, and scans. Numbered prompts are used when
-the terminal cannot support arrow-key menus.
+the terminal cannot support arrow-key menus. `Start-FinOpsMultitool` remains
+available as a backward-compatible wrapper for existing scripts.
 
 For an unattended run, authenticate separately with the intended Azure identity
 first, then use `-NonInteractive` and explicit scope/scan parameters. Do not
@@ -92,7 +94,7 @@ subscription selection changes context only in the current PowerShell process.
 The root `FinOpsToolkit.psm1` loader is also included for compatibility. Importing
 it exports the additional commands packaged in this snapshot, including
 commands unrelated to the TUI. The direct entry-point instructions above avoid
-importing that broader command surface. Only the Multitool scan modules are
+importing that broader command surface. Only the FinOps Explorer scan modules are
 described as read-only; this is not a blanket statement about every packaged
 command.
 
@@ -118,7 +120,7 @@ inventory scans can still query Azure. Export failures never switch to live cost
 There is no local input-file parameter; `-OutputPath` sets the report destination.
 
 To skip Hub detection and look for ordinary exports directly, run
-`Start-FinOpsMultitool -DataSource Export`. Keep the intended tenant and subscriptions
+`Start-FinOpsExplorer -DataSource Export`. Keep the intended tenant and subscriptions
 selected. Choose an export from the displayed destinations; unattended mode requires
 exactly one candidate. Storage Blob Data Reader or equivalent data access and a
 permitted network path are required. The picker discovers subscription exports,
@@ -159,7 +161,7 @@ the scope. They don't create a hub, configure an export, or change Azure resourc
     $ErrorActionPreference = 'Stop'
     $tenantId = '<tenant-id>'
     $subscriptionId = '<subscription-id>'
-    . .\Public\Start-FinOpsMultitool.ps1
+    . .\Public\Start-FinOpsExplorer.ps1
     Connect-AzAccount -Tenant $tenantId -Subscription $subscriptionId
     ```
 
@@ -219,7 +221,7 @@ Use this path when a FinOps hub already ingests costs into Azure Data Explorer
     ```powershell
     $env:FINOPS_HUB_KUSTO_URI = 'https://<your-query-host>'
     $env:FINOPS_HUB_KUSTO_DB = 'Hub'
-    Start-FinOpsMultitool -SubscriptionId $subscriptionId -DataSource Hub -Scans $scanNames
+    Start-FinOpsExplorer -SubscriptionId $subscriptionId -DataSource Hub -Scans $scanNames
     ```
 
 5. Confirm that the console shows **Querying FinOps Hub Kusto database** and the
@@ -251,7 +253,7 @@ selected Kusto provider.
 
     ```powershell
     Remove-Item Env:\FINOPS_HUB_KUSTO_URI, Env:\FINOPS_HUB_KUSTO_DB -ErrorAction SilentlyContinue
-    Start-FinOpsMultitool -SubscriptionId $subscriptionId -DataSource Hub -Scans $scanNames
+    Start-FinOpsExplorer -SubscriptionId $subscriptionId -DataSource Hub -Scans $scanNames
     ```
 
 3. Check the source shown in the console. **Loading cost data from FinOps Hub
@@ -309,7 +311,7 @@ Use this path without a Hub, or when you want to query Cost Management directly.
 2. Start the scan with an explicit source and scope.
 
     ```powershell
-    Start-FinOpsMultitool -SubscriptionId $subscriptionId -DataSource API -Scans $scanNames
+    Start-FinOpsExplorer -SubscriptionId $subscriptionId -DataSource API -Scans $scanNames
     ```
 
 3. Review the selected scans, then run them. `API` skips Hub discovery and
@@ -359,7 +361,7 @@ Finish every source-specific walkthrough with these checks:
   recommendations. Review sensitive data before sharing any report and follow
   [Reports and privacy](#reports-and-privacy).
 
-## Use the Multitool with Fabric
+## Use FinOps Explorer with Fabric
 
 If your organization already ingests FinOps data into a Fabric Eventhouse,
 the TUI can reuse its compatible KQL database. You don't need to deploy a
@@ -390,12 +392,37 @@ set up an ingestion pipeline. See Microsoft's
 and [FinOps hubs overview](https://learn.microsoft.com/cloud-computing/finops/toolkit/hubs/finops-hubs-overview)
 for the upstream architecture and setup requirements.
 
+## Forecast pre-credit cost and workload growth
+
+This standalone copy adds a fiscal-year forecast built from your own Cost
+Management exports. It shows actuals to date plus the rest of the year as a
+central estimate with a sensitivity range, and which workloads drove the
+growth. Amounts are pre-credit (cost before Azure credits and prepayment), with
+Marketplace and tax excluded by default. It reads EA, MCA, and FOCUS
+actual-cost exports, joins EA and MCA history across a migration, and falls
+back to manual monthly inputs when no exports exist.
+
+```powershell
+Start-FinOpsForecast -WorkspaceName contoso-fy27
+```
+
+You can also choose **Pre-credit forecast and workload growth** at the first
+prompt of `Start-FinOpsExplorer`. Scripted Explorer runs (`-NonInteractive`,
+`-Scans`, or `-DataSource`) skip that prompt.
+
+The forecast reads Azure data only. It needs 12 or more complete months, asks
+for a decision whenever the data is ambiguous, and won't save a forecast until
+every required check passes. See the [usage guide](docs/forecast.md) and the
+[design and integration plan](docs/forecast-design.md).
+
 ## Reports and privacy
 
 Scans read Azure data and write **local reports**. By default, each run creates
-a private timestamped directory beneath `FinOpsToolkit\Multitool\Reports` in
+a private timestamped directory beneath `FinOpsToolkit\Explorer\Reports` in
 the current user's local application data directory. It contains CSV results,
-an HTML report, and a text summary.
+an HTML report, and a text summary. The forecast also keeps a private
+workspace per name beneath `FinOpsToolkit\Explorer\Forecast` with its
+settings, review decisions, cached export history, and saved forecasts.
 
 Reports can include tenant/subscription identifiers, resource names, tags,
 billing information, and costs. Do not upload reports, credentials, access
@@ -411,14 +438,14 @@ result; a preview scan is not a substitute for reviewing Azure's source data.
 
 Download [Azure Tool Launcher](https://github.com/z-larsen/AzureToolLauncher)
 and set its local configuration's `FinOpsToolkitRoot` to this extracted folder.
-For sibling folders named `AzureToolLauncher` and `FinOps-Multitool-TUI`:
+For sibling folders named `AzureToolLauncher` and `FinOps-Explorer-TUI`:
 
 ```powershell
-FinOpsToolkitRoot = '..\FinOps-Multitool-TUI'
+FinOpsToolkitRoot = '..\FinOps-Explorer-TUI'
 ```
 
 That setting belongs **inside the launcher's PSD1 configuration**, not at a
-PowerShell prompt. Use `..\FinOps-Multitool-TUI-main` instead if you kept the
+PowerShell prompt. Use `..\FinOps-Explorer-TUI-main` instead if you kept the
 ZIP's original folder name. The launcher recognizes the standalone `Public`
 and `Private` layout as well as the alternative `src\powershell` source layout.
 
@@ -438,6 +465,16 @@ that every Azure scan works for your identity and data source.
 Use a test scope first and review results before wider use. Report reproducible
 issues with sanitized details only.
 
+The forecast has its own Pester 6 suite in `Tests/`, using synthetic data only:
+
+```powershell
+.\scripts\Invoke-ForecastTests.ps1 -ToolkitRoot '<path-to-finops-toolkit-repository>'
+```
+
+It covers export selection and verification, EA-to-MCA joins, the forecast
+method, workloads, manual inputs, the workspace store, the console screens,
+end-to-end runs, and read-only safety. It doesn't test live Azure access.
+
 For the original public packaging, all 79 PowerShell files passed syntax parsing,
 the KPI catalog parsed as JSON, and the root module and public entry point loaded
 without running scans. The bundled empty Power BI template had its opaque
@@ -455,11 +492,14 @@ they don't establish live Azure data access.
 
 ### Keep the runtime in parity
 
-The public launcher and shared Multitool runtime should match the Toolkit
+The public launchers and shared runtime should match the Toolkit
 implementation. Distribution differences are limited to standalone version
-loading and report labels, documentation, and the sanitized Power BI template.
-The KPI helper and catalog are copied unchanged; the report renderer retains
-four standalone version overlays.
+loading and report labels, the forecast hook, documentation, and the sanitized
+Power BI template. The KPI helper and catalog are copied unchanged; the report
+renderer retains four standalone version overlays, and the launcher has one
+nine-line hook that offers the forecast. The forecast itself lives in
+`Private/FinOpsForecast` and `Public/Start-FinOpsForecast.ps1`, outside the
+compared runtime, so a Toolkit sync doesn't touch it.
 
 To compare a future refresh with a local Toolkit source checkout, run:
 

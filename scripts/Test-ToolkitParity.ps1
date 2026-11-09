@@ -1,12 +1,15 @@
 ###########################################################################
 # TEST-TOOLKITPARITY.PS1
-# COMPARE THE STANDALONE MULTITOOL WITH A TOOLKIT SOURCE CHECKOUT
+# COMPARE THE STANDALONE FINOPS EXPLORER TUI WITH A TOOLKIT SOURCE CHECKOUT
 ###########################################################################
 # Purpose: Detect shared runtime drift without running scans or changing files.
 # Author: Zac Larsen
 # Date: September 2026
 # Description: Compare the public launcher and shared runtime, allowing only
-# the standalone version labels, distribution README, and sanitized template.
+# the standalone version labels, the forecast launcher hook, the distribution
+# README, and the sanitized template. The standalone forecast lives in
+# Private/FinOpsForecast and Public/Start-FinOpsForecast.ps1, outside the
+# compared runtime.
 # Prerequisites: PowerShell 7 and a local FinOps Toolkit source checkout.
 # Usage: ./scripts/Test-ToolkitParity.ps1 -ToolkitRoot <toolkit-repository>
 ###########################################################################
@@ -59,17 +62,34 @@ foreach ($relativePath in @($sourceFiles.Keys + $targetFiles.Keys | Sort-Object 
                 Replacement = ''
             }
             @{
-                Text = '<title>FinOps Multitool Report $reportVersion &mdash; $timestamp</title>'
-                Replacement = '<title>FinOps Multitool Report &mdash; $timestamp</title>'
+                Text = '<title>FinOps Explorer TUI Report $reportVersion &mdash; $timestamp</title>'
+                Replacement = '<title>FinOps Explorer TUI Report &mdash; $timestamp</title>'
             }
             @{
                 Text = '<p class="meta">Version: $reportVersion &nbsp;|&nbsp; Generated:'
                 Replacement = '<p class="meta">Generated:'
             }
+            # Standalone only: the launcher hook that offers the pre-credit forecast.
+            @{
+                Text = (@(
+                        '    # Standalone forecast: offer the pre-credit forecast before the scan workflow.'
+                        '    $forecastModule = Join-Path $PSScriptRoot ''../FinOpsForecast/FinOpsForecast.psm1'''
+                        '    if (-not $NonInteractive -and -not $Scans -and -not $DataSource -and (Test-Path -LiteralPath $forecastModule)) {'
+                        '        Import-Module $forecastModule -Force'
+                        '        if ((Select-FinOpsExplorerMode -Accessible:$Accessible) -eq ''Forecast'') {'
+                        '            Invoke-FinOpsForecast -OutputPath $OutputPath -Accessible:$Accessible'
+                        '            return'
+                        '        }'
+                        '    }'
+                        ''
+                        ''
+                    ) -join "`n")
+                Replacement = ''
+            }
         )
         foreach ($overlay in $overlays) {
             if ([regex]::Matches($targetText, [regex]::Escape($overlay.Text)).Count -ne 1) {
-                throw 'A standalone version overlay changed; review the parity exceptions.'
+                throw 'A standalone overlay changed; review the parity exceptions.'
             }
             $targetText = $targetText.Replace($overlay.Text, $overlay.Replacement)
         }
@@ -80,18 +100,21 @@ foreach ($relativePath in @($sourceFiles.Keys + $targetFiles.Keys | Sort-Object 
     }
 }
 
-$entryPoint = 'Public/Start-FinOpsMultitool.ps1'
-$sourceEntry = Join-Path $toolkitPowerShell $entryPoint
-$targetEntry = Join-Path $standaloneRoot $entryPoint
-if ((Get-FileHash -LiteralPath $sourceEntry).Hash -ne (Get-FileHash -LiteralPath $targetEntry).Hash) {
-    $differences.Add("Public launcher differs: $entryPoint")
+$entryPoints = @('Public/Start-FinOpsExplorer.ps1', 'Public/Start-FinOpsMultitool.ps1')
+foreach ($entryPoint in $entryPoints) {
+    $sourceEntry = Join-Path $toolkitPowerShell $entryPoint
+    $targetEntry = Join-Path $standaloneRoot $entryPoint
+    if ((Get-FileHash -LiteralPath $sourceEntry).Hash -ne (Get-FileHash -LiteralPath $targetEntry).Hash) {
+        $differences.Add("Public launcher differs: $entryPoint")
+    }
 }
 if ($differences.Count -gt 0) { throw ($differences -join [Environment]::NewLine) }
 
 [pscustomobject]@{
     Result = 'Passed'
     RuntimeFilesCompared = $sourceFiles.Count
-    PublicLauncher = 'Identical'
+    PublicLaunchers = 'Identical'
     VersionOverlays = 4
+    ForecastHook = 'Present'
     ExcludedDistributionFiles = $exceptions
 }
