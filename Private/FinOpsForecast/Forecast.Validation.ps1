@@ -41,6 +41,7 @@ function Test-ForecastReadiness {
     $inWindow = { param($month) (Test-ForecastMonthKey $month) -and [string]::CompareOrdinal($month, $window.First) -ge 0 -and [string]::CompareOrdinal($month, (ConvertTo-ForecastMonthKey $asOfUtc)) -le 0 }
 
     $settingIssues = @(Test-ForecastSettings -Settings $Settings | Where-Object { -not ($Settings.dataMode -eq 'Manual' -and $_.Code -in 'SET-SOURCE', 'SET-SCOPE') })
+    $settingIssues += @($Model.Issues | Where-Object { $_.Severity -eq 'Fail' -and $_.Code -like 'WIN-*' })
     $checks.Add((New-ForecastCheck -Id 'SETTINGS' -Name 'Settings' -Status $(if ($settingIssues.Count) { 'Fail' } else { 'Pass' }) -Detail $(if ($settingIssues.Count) { ($settingIssues.Message -join ' ') } else { 'Source, scope, period, and method settings are valid.' })))
 
     $datasetFails = @($Dataset.Issues | Where-Object { $_.Severity -eq 'Fail' -and $_.Code -notin 'REC-DIFF', 'BND-MISSING', 'CUR-MIXED' -and $_.Code -notmatch '^(SCH|MAP)-' })

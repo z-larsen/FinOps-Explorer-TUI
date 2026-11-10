@@ -403,6 +403,7 @@ actual-cost exports, joins EA and MCA history across a migration, and falls
 back to manual monthly inputs when no exports exist.
 
 ```powershell
+. .\Public\Start-FinOpsForecast.ps1
 Start-FinOpsForecast -WorkspaceName contoso-fy27
 ```
 

@@ -49,7 +49,12 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
 4. **Cache.** Results are cached per run. The signature includes manifest dates and modification time, plus each partition's modification time, size, and declared counts. Same-size corrections are re-read when their modification time changes; missing partition timestamps disable reuse. The ingest profile includes source locations and schema overrides, the tag key, the boundary date, and the ingestion version. Changing it requires a refresh. If a previously usable cached run becomes unreadable or invalid, refresh fails and keeps the previous cache. A newly discovered incomplete run can still be recorded while an older complete run remains selected.
 5. **Select.** For each (original scope, dataset, month), prefer a run that covers the whole month, then a legacy run, then one still in progress; among those, the latest complete, approved run wins. A run that starts after the first of the month can't stand in for it and raises a warning. A legacy file only counts as covering the whole month if its rows reach the month's last day; otherwise it's treated as still in progress. A month counts as final once a whole-month run was submitted at least the grace period after month end. A corrected rerun replaces the month instead of adding to it. Several legacy files for one month raise a warning, because they're more likely different datasets than reruns.
 6. **Assemble.** Apply overlap, boundary, scope, and filter rules, then reconcile every run-month to its raw total. Overlap is decided per subscription, or per billing profile for charges without a subscription. Check each row's date, not just its month, against the run range. Outside-range charges and row counts appear once, on that run's first selected reconciliation row, in both the raw total and the excluded amount. An end at midnight on the next month's first day is exclusive; other end dates are inclusive. A final month whose last charge precedes month end raises a warning.
-7. **Model, gate, report.** Run the forecast and the readiness checks, then write reports. Save a vintage only when the forecast is Ready.
+7. **Model, gate, report.** Run the forecast and the readiness checks, then write reports. Save a vintage only when the forecast is Ready. A rejected future window remains a blocking settings failure even when a fallback window is used for preview.
+
+Legacy run identity includes the source ID, so identical relative filenames in
+different sources aren't discarded as duplicates. Only manifest-backed runs can
+share a run identity across sources. Folder dates never substitute for observed
+month-end coverage in a legacy file.
 
 ### Charge streams
 
@@ -67,7 +72,7 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
 - **Run rate:** month cost × 30 / days in month.
 - **Comparisons:** N complete months give N − 1 adjacent changes, ordered by month key, never by row order. A zero or negative previous month makes the change undefined, and it needs an acknowledgement.
 - **Anomalies:** a change is flagged when |change − median| > max(K × 1.4826 × MAD, minimum deviation). The defaults are K = 3 and 5 points. A flag needs a review: Retain, Exclude, or Step change. Step change is suggested when the new level held the following month, unless the change reverses a flagged change just before it and brings the run rate back near its trend; that's a one-off spike or dip, so Exclude is suggested.
-- **Growth:** the median of retained changes. The sensitivity range is the 25th to 75th percentile (PERCENTILE.INC). At least 8 of 11 must be retained.
+- **Growth:** the median of retained changes. The sensitivity range is the 25th to 75th percentile (PERCENTILE.INC). Custom percentiles must satisfy `0 <= low < 50 < high <= 100`, including settings loaded from JSON. At least 8 of 11 must be retained.
 - **Baseline:** the latest month's run rate. If that month is anomalous, a separate review picks the latest month, the median of the last three months, or a manual value with a reason.
 - **Projection:** baseline × (1 + g)^h × days / 30 for each path, where h is months after the window.
 - **Current month:** actuals so far plus the forecast for the remaining days. Verified manifest coverage includes days with no charges, including an empty partition; it isn't shortened to the last charge date. A configured range extending beyond submission is capped at the prior day, or a later day already carrying actual charges. Legacy files still use observed row dates. Different coverage cutoffs across selected partial-month runs block Ready until refreshed to a common cutoff. A scheduled item whose commitment ID matches a posted Purchase charge isn't added again; a Refund alone does not satisfy it.
@@ -76,6 +81,10 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
 - **Backtest:** every cutoff with a full window and a later month, using automatic exclusions. It reports mean absolute error, bias, and how often actuals fell in range. These are observed results, not a calibration.
 
 Money is `[decimal]` throughout and stored as invariant strings in JSON. Display rounding is banker's rounding to cents. Reconciliation treats differences under 0.000001 as rounding: `[decimal]` keeps 28 to 29 significant digits, so very long amounts summed in a different order can differ in the last digit.
+
+Manual approval fingerprints include currency as well as amounts and evidence.
+SHA-256 identifiers use `SHA256.Create().ComputeHash()` and `BitConverter`, avoiding
+the .NET 5-only hashing helpers while retaining the same digest strings.
 
 ## Readiness gate
 

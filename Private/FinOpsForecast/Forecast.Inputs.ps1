@@ -159,7 +159,7 @@ function ConvertTo-ForecastDatasetFromInputs {
             })
         if ($monthStatus -ne 'Missing') {
             $chargeText = (@($chargesByMonth[$month] | Where-Object { $_ } | Sort-Object { [string]$_.id } | ForEach-Object { "$($_.id)=$($_.type)=$($_.amount)" }) -join ';')
-            $fingerprint = Get-ForecastHash -Text "$month|$status|$(Format-ForecastDecimal $usage)|$evidence|$chargeText"
+            $fingerprint = Get-ForecastHash -Text "$($Inputs.currency)|$month|$status|$(Format-ForecastDecimal $usage)|$evidence|$chargeText"
             $review = New-ForecastReviewItem -Key "manual:${scopeKey}:$month" -Fingerprint $fingerprint -Category 'ManualMonth' -Reviews $Reviews -Subject $month `
                 -Title "Approve manual inputs for $month" -Detail "Usage $(Format-ForecastAmount $usage $Inputs.currency) ($status). Evidence: $(ConvertTo-ForecastSafeText $evidence 200)" `
                 -Options @('Approved') -Suggested 'Approved'
