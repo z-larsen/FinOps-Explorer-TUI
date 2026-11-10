@@ -290,8 +290,10 @@ function Compare-ForecastDecimalDescending {
 function Get-ForecastHash {
     param([AllowEmptyString()][string]$Text, [int]$Length = 16)
     $bytes = [Text.Encoding]::UTF8.GetBytes([string]$Text)
-    $hash = [Security.Cryptography.SHA256]::HashData($bytes)
-    return ([Convert]::ToHexString($hash).ToLowerInvariant()).Substring(0, $Length)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { $hash = $algorithm.ComputeHash($bytes) }
+    finally { $algorithm.Dispose() }
+    return ([BitConverter]::ToString($hash).Replace('-', '').ToLowerInvariant()).Substring(0, $Length)
 }
 
 function ConvertTo-ForecastSubscriptionId {

@@ -80,7 +80,7 @@ function Test-ForecastSettings {
     $method = $Settings.method
     $low = Read-ForecastDecimal -Value $method.lowPercentile
     $high = Read-ForecastDecimal -Value $method.highPercentile
-    if ($null -eq $low -or $null -eq $high -or $low -lt 0 -or $high -gt 100 -or $low -ge $high) { $issues.Add((New-ForecastIssue -Code 'SET-BAND' -Message 'The sensitivity percentiles must satisfy 0 <= low < high <= 100.')) }
+    if ($null -eq $low -or $null -eq $high -or $low -lt 0 -or $high -gt 100 -or $low -ge 50 -or $high -le 50) { $issues.Add((New-ForecastIssue -Code 'SET-BAND' -Message 'The sensitivity percentiles must bracket the median: 0 <= low < 50 < high <= 100.')) }
     $k = Read-ForecastDecimal -Value $method.anomalyK
     if ($null -eq $k -or $k -le 0) { $issues.Add((New-ForecastIssue -Code 'SET-ANOMALYK' -Message 'The anomaly multiplier must be greater than zero.')) }
     $minimumDeviation = Read-ForecastDecimal -Value $method.anomalyMinimumDeviation

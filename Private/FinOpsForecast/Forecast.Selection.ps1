@@ -44,11 +44,13 @@ function Get-ForecastRunCoverage {
     # A legacy file whose rows stop earlier counts as MonthToDate.
     param([Parameter(Mandatory)]$Result, [Parameter(Mandatory)][string]$Month)
     $lastDay = (Get-ForecastMonthEnd -MonthKey $Month).AddDays(-1)
-    if (-not $Result.Start) {
+    if (-not $Result.HasManifest) {
         $stat = @($Result.MonthStats | Where-Object Month -EQ $Month)[0]
-        if ($stat -and $stat.Through -and ([datetime]$stat.Through).Date -lt $lastDay) { return 'MonthToDate' }
+        if ($Result.Start -and ([datetime]$Result.Start).Date -gt (Get-ForecastMonthStart -MonthKey $Month)) { return 'Partial' }
+        if (-not $stat -or -not $stat.Through -or ([datetime]$stat.Through).Date -lt $lastDay) { return 'MonthToDate' }
         return 'Unknown'
     }
+    if (-not $Result.Start) { return 'Unknown' }
     $monthStart = Get-ForecastMonthStart -MonthKey $Month
     $runStart = ([datetime]$Result.Start).Date
     $runEnd = if ($Result.End) { Get-ForecastRunLastDate -Start $Result.Start -End $Result.End } else { $runStart }
@@ -72,7 +74,7 @@ function Select-ForecastRuns {
     $unique = [Collections.Generic.List[object]]::new()
     $seenRuns = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
     foreach ($result in $Results) {
-        $identity = "$($result.RunId)|$($result.Folder)"
+        $identity = if ($result.HasManifest) { "manifest:$($result.RunId)|$($result.Folder)" } else { "legacy:$($result.RunKey)" }
         if ($seenRuns.ContainsKey($identity)) {
             $issues.Add((New-ForecastIssue -Code 'RUN-DUPLICATESOURCE' -Severity 'Info' -Message "Run $(ConvertTo-ForecastSafeText $result.RunId 80) appears in sources $($seenRuns[$identity]) and $($result.SourceId); it's counted once."))
             continue

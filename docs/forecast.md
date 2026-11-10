@@ -59,6 +59,10 @@ A typical first run:
 
 The forecast doesn't guess when the data is ambiguous. It asks, records your answer with a reason, and asks again if the underlying data changes later.
 
+Manual-month approvals include the billing currency. Changing it reopens every
+month for review; existing approvals saved before this check also need to be
+confirmed once. No currency conversion is performed.
+
 | Exception | Your choice |
 |---|---|
 | Anomalous month-to-month change | Retain, Exclude from growth, or Step change (a new level that held). Check what happened first; actual charges always stay in actuals. A drop back to the trend right after a spike is suggested as Exclude, not Step change. |
@@ -67,7 +71,7 @@ The forecast doesn't guess when the data is ambiguous. It asks, records your ans
 | Unclassified publisher | Treat rows from non-Microsoft publishers as Marketplace or Microsoft. EA exports label every row `Azure`, so this comes up for EA. The decision covers the publisher names it lists; new rows from those publishers keep it, and a new publisher reopens it. |
 | Overlapping export scopes | Pick which export to keep when two carry the same subscription and month. Charges without a subscription, such as a shared savings plan purchase, follow the same choice by billing profile. |
 | Recurring purchase not scheduled | Add a scheduled item, or confirm it won't recur. |
-| Legacy export file without a manifest | Approve only if you've confirmed it's the complete actual-cost export for the month. It counts as a whole month only if its rows reach the month's last day. |
+| Legacy export file without a manifest | Approve only if you've confirmed it's the complete actual-cost export for the month. Its rows must reach the month's last day even when its folder name describes a whole month. Matching filenames in different sources are reviewed separately. |
 | Positive refund rows, unknown charge types, boundary exclusions | Acknowledge after checking. |
 
 ## Scheduled items
@@ -119,9 +123,12 @@ It refreshes, writes reports, and saves a vintage if the forecast is Ready. If i
 
 - **Central estimate** uses the median month-over-month change in run rate.
 - **Sensitivity range** uses the 25th to 75th percentile of historical changes. It shows how much the history varied. It is **not** a confidence interval.
+- **Custom percentiles** must satisfy `0 <= low < 50 < high <= 100`, so the range brackets the central median. This is checked for JSON settings as well as console edits.
 - **Fiscal-year totals** add completed months, this month's actuals so far plus the rest of the month, the remaining forecast months, and scheduled items. Low and high each follow one growth path for the whole year.
 - **Month-to-date coverage** comes from the verified run range, bounded by when the run was submitted. Days with no charges aren't forecast again. If selected runs have different coverage cutoffs, Ready is blocked until a refresh brings them into line.
 - **Partial population** means a subscription in scope is missing data in some months. **Stale data** means the last refresh failed or the newest data is old. Both appear on every output.
+- **Invalid pinned windows** block Ready and saving a vintage. The preview can use the latest eligible month, but the settings check explains why the requested window was rejected.
+- **Zero and missing amounts** look different in HTML: a measured zero is `0.00`; a missing amount is blank. Table paging keeps keyboard focus on an enabled navigation button.
 
 ## Limits to know
 

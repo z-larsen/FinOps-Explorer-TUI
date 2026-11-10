@@ -22,7 +22,7 @@ function ConvertTo-ForecastHtmlText {
 function Format-ForecastHtmlCell {
     param([AllowNull()]$Value, [string]$Format)
     switch ($Format) {
-        'amount' { if ($null -eq $Value -or $Value -eq '') { return '' } return Format-ForecastAmount ([decimal]$Value) }
+        'amount' { if ($null -eq $Value -or ($Value -is [string] -and $Value.Length -eq 0)) { return '' } return Format-ForecastAmount ([decimal]$Value) }
         'percent' { return Format-ForecastPercent $Value }
         'date' { if ($Value -is [datetime]) { return ([datetime]$Value).ToString('yyyy-MM-dd', $script:ForecastInvariant) } return [string]$Value }
         default {
@@ -145,6 +145,17 @@ th{background:#f3f3f3;position:sticky;top:0}td.num{text-align:right;white-space:
     var filter = document.querySelector('input[data-filter="' + table.id + '"]');
     var pager = document.querySelector('[data-pager="' + table.id + '"]');
     var page = 0;
+    var label = document.createElement('span');
+    label.setAttribute('aria-live', 'polite');
+    pager.appendChild(label);
+    var buttons = [['Previous', -1], ['Next', 1]].map(function (pair) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = pair[0];
+      button.addEventListener('click', function () { page += pair[1]; render(); });
+      pager.appendChild(button);
+      return button;
+    });
     function matches() {
       var text = filter ? filter.value.toLowerCase() : '';
       return rows.filter(function (row) { return !text || row.textContent.toLowerCase().indexOf(text) >= 0; });
@@ -155,18 +166,12 @@ th{background:#f3f3f3;position:sticky;top:0}td.num{text-align:right;white-space:
       if (page >= pages) { page = pages - 1; }
       rows.forEach(function (row) { row.style.display = 'none'; });
       visible.slice(page * size, page * size + size).forEach(function (row) { row.style.display = ''; });
-      pager.textContent = '';
-      var label = document.createElement('span');
       label.textContent = visible.length + ' rows, page ' + (page + 1) + ' of ' + pages + ' ';
-      pager.appendChild(label);
-      [['Previous', -1], ['Next', 1]].forEach(function (pair) {
-        var button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = pair[0];
-        button.disabled = (pair[1] < 0 && page === 0) || (pair[1] > 0 && page >= pages - 1);
-        button.addEventListener('click', function () { page += pair[1]; render(); });
-        pager.appendChild(button);
-      });
+      var focused = document.activeElement;
+      buttons[0].disabled = page === 0;
+      buttons[1].disabled = page >= pages - 1;
+      if (focused === buttons[0] && buttons[0].disabled && !buttons[1].disabled) { buttons[1].focus(); }
+      else if (focused === buttons[1] && buttons[1].disabled && !buttons[0].disabled) { buttons[0].focus(); }
     }
     if (filter) { filter.addEventListener('input', function () { page = 0; render(); }); }
     render();
