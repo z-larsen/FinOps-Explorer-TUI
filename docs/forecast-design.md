@@ -20,7 +20,7 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
 
 | Path | Purpose |
 |---|---|
-| `Private/FinOpsForecast/` | The forecast module: 19 PowerShell scripts, a module loader, and one C# reducer |
+| `Private/FinOpsForecast/` | The forecast module: 20 PowerShell scripts, a module loader, and one C# reducer |
 | `Public/Start-FinOpsForecast.ps1` | Public entry point |
 | `Private/FinOpsMultitool/Invoke-FinOpsMultitool.ps1` | One 9-line hook after the banner that offers the forecast. Skipped for `-NonInteractive`, `-Scans`, and `-DataSource` |
 | `scripts/Test-ToolkitParity.ps1` | Treats that hook as an allowed standalone overlay, next to the four version overlays |
@@ -61,12 +61,12 @@ month-end coverage in a legacy file.
 
 A `CostDetails` source (`Forecast.CostDetails.ps1`) produces the same run records as an export, so steps 2 to 7 don't change:
 
-- **Months.** Every whole month inside the API's 13-month reach (with a day's margin), then the current month through yesterday, narrowed by optional `fromMonth` and `toMonth`. On the first of a month, the current month is skipped.
+- **Months.** Every whole month inside the API's 13-month reach (with a day's margin), then the current month through yesterday, narrowed by optional `fromMonth` and `toMonth`. On the first of a month, the current month is skipped. A `fromMonth` of `Auto` starts at `Get-ForecastFirstNeededMonth`: the lookback window's first month, or the fiscal year's first month when that's earlier. Refresh computes it from the current settings, so raising the lookback or moving the fiscal year reads the earlier months next time. Guided setup creates `Auto` sources, and so does the console's **C** by default.
 - **Runs and partitions.** One run per month, with a stable key per source, scope, and month so a new read replaces the cached one. Each run has one partition per chunk of `chunkDays` days (default 7, 1 to 31). The run is `ActualCost` with `HasManifest` set, its scope is the source scope, and `Submitted` is the refresh time, so finality and coverage follow the usual rules.
 - **Lazy generation.** Nothing is requested until ingestion reads a partition. Then one POST to `{scope}/providers/Microsoft.CostManagement/generateCostDetailsReport` asks for `ActualCost` for that chunk's dates; the scope is re-validated inside the function that sends it, and the safety tests allow only the partition read to call that function. The returned `Location` is followed only if it's on the signed-in cloud's Resource Manager host, for the same scope, and is a `costDetailsOperationResults` or `costDetailsOperationStatus` path. Polling honors `Retry-After` (5 to 300 seconds) for up to 30 minutes.
 - **Manifest checks.** `NoDataFound` reads as an empty partition. `Completed` must echo the requested scope, dates, and `ActualCost`; a missing echo fails the chunk. It must also be uncompressed CSV, with file counts and byte totals that match. Each file is downloaded without credentials or redirects, from an HTTPS blob endpoint of the signed-in cloud, and must be exactly its declared size. A connection that sends nothing for five minutes fails the chunk. Files in one report are joined with the header kept once. Cost Details manifests have no row counts, so verification rests on byte counts and a clean parse.
 - **Links.** Download links are SAS URLs. They live only in local variables inside the partition read and never reach messages, the cache, or reports. A test fails if any workspace file or message contains them.
-- **Reuse.** A cached Complete month read at least the grace period after month end is reused without a request. Other months are reused if read under four hours ago for the same days, since Cost Management refreshes these reports about every four hours. Final months this source read earlier but the API can no longer reach are carried forward, within the source's `fromMonth` and `toMonth`. Until last month passes its grace period, the forecast window starts one month beyond the API's reach, so dropping them would open a gap. Because those months can't be read again, Cost Details records carry a per-source profile hash (ingest version, tag key, boundary, and that source's settings) instead of the workspace-wide one, so adding or editing another source keeps them. When a tag key, boundary, or source change does invalidate them, the refresh warns and names the months it dropped.
+- **Reuse.** A cached Complete month read at least the grace period after month end is reused without a request. Other months are reused if read under four hours ago for the same days, since Cost Management refreshes these reports about every four hours. Final months this source read earlier but no longer requests, such as months the API can no longer reach, are carried forward within a fixed `fromMonth` and the `toMonth`. `Auto` sets no lower bound, so lowering the lookback and raising it again doesn't lose months that can't be read again. Until last month passes its grace period, the forecast window starts one month beyond the API's reach, so dropping them would open a gap. Because those months can't be read again, Cost Details records carry a per-source profile hash (ingest version, tag key, boundary, and that source's settings) instead of the workspace-wide one, so adding or editing another source keeps them. When a tag key, boundary, or source change does invalidate them, the refresh warns and names the months it dropped.
 - **Failures.** A chunk failure makes its month Incomplete, like a missing partition. A 429 after Explorer's retries pauses further Cost Details requests until the service's retry time. If a refresh fails outright, any month this attempt read completely replaces its own record in the previous cache, so a long first pull resumes instead of restarting. The previous cache's workspace profile hash is kept, so a pending settings change still asks for a refresh.
 - **Charge dates.** Learn ties the data to when the billing system received a cost. A charge dated before the requested month is excluded and reported as outside the run's range, never moved into the earlier month.
 
@@ -102,11 +102,12 @@ the .NET 5-only hashing helpers while retaining the same digest strings.
 
 ## Readiness gate
 
-Ready requires no **Fail** in any of these checks:
+Ready requires a lookback of at least 12 months and no **Fail** in any of these checks:
 
 - Settings.
 - Source data and partitions.
-- Complete months (12 or more by default).
+- Complete months: every month in the lookback.
+- Fiscal-year actuals: every month of the fiscal year before the lookback window has final data. Otherwise the projection would count it as zero.
 - All comparisons computed.
 - Enough retained comparisons.
 - A single currency.
@@ -117,6 +118,16 @@ Ready requires no **Fail** in any of these checks:
 - No pending required reviews.
 
 Freshness and partial population raise **Warn** and labels instead. Failed checks block saving a vintage. Reports can still be written, labeled NotReady.
+
+A lookback of 3 to 11 months is a deliberate choice, so it doesn't fail a check. The History length check warns instead, and the status is **Preliminary** when nothing fails, or NotReady when something does. Every output carries the label, the disclosure explains how few changes the growth rests on, and a Preliminary forecast is never saved as a vintage. The default minimum of retained comparisons scales with the lookback as floor((N − 1) × 8 / 11), at least 1, so 12 months still needs 8 of 11. Changing the lookback in the console rescales a default threshold and only clamps a customized one.
+
+## Guided setup
+
+`Forecast.Guided.ps1` builds a workspace's settings from a few questions. Without a workspace name or `-ConfigPath`, an interactive run first calls Explorer's `Select-Subscription` for the tenant and subscriptions. It then opens a workspace named after the tenant: its display name or default domain plus the first 8 hex characters of the tenant ID. That stops one customer's vintages and reviews from being compared with another's. An empty workspace goes to setup; one already set up asks whether to open it or set it up again. A named workspace that's empty also starts setup, signing in there.
+
+Setup asks for the source (live Cost Details, exports, or manual), the history length (3 to 12 live, 3 to 36 otherwise), and the fiscal year's first month, before building any source, so the first month needed covers fiscal-year months before a short window. It then replaces the sources, scope, lookback, window end, and retained-comparison default, keeps everything else, and offers a refresh.
+
+Live sources use the chosen subscriptions directly when there are up to three, with one 31-day report per month. Above that, `Get-ForecastCostDetailsBillingScopes` lists billing accounts with one read-only GET, and Explorer's `Get-FinOpsBillingScope` confirms each selected subscription's owner. An account is offered only when every owner is confirmed and it's the single EA or MCA account that owns them all, so a billing-account read never misses a selected subscription. It's read in weekly reports, and the forecast's subscription scope filters its rows back to the selected subscriptions. Source IDs are derived from the scope, so running setup again reuses months already read. Live sources use `fromMonth` `Auto`. Setup warns when the first month needed is beyond Cost Management's reach, and estimates the first refresh's report requests from that month.
 
 ## Verified Azure facts
 
@@ -180,7 +191,8 @@ Validating these against sanitized real exports is the main open task.
 | Rounding isn't a reconciliation failure | Exports: differences under 0.000001 pass, larger ones fail |
 | One-off spikes | Engine: the drop back after a spike is suggested as Exclude; a drop that settles at a new level is still a step change |
 | Display names | Workloads: subscriptions with the same name get a short ID |
-| Cost Details source | `Forecast.CostDetails.Tests.ps1`, against a synthetic API: month planning and chunking; scope and settings validation; one POST per chunk with the exact path and body; status links on another host, scope, or operation refused; mismatched or missing manifest echoes rejected; NoDataFound; access and throttle failures; credential-free, redirect-free, size-checked downloads over loopback, including a stalled connection; closed months reused and the open month re-read after four hours; final months beyond the API's reach kept while the window needs them; links never persisted; months kept after a failed refresh; outside-month charges reported; EA enrollment and MCA billing profile joined at the boundary. Safety: only that file may POST, only to `generateCostDetailsReport`, only from a partition read, with GET-only downloads |
+| Guided setup and Preliminary forecasts | `Forecast.Guided.Tests.ps1`: 3 to 36 month lookbacks and the scaled retained default; a 6-month history is Preliminary with no failing check, labeled once in the summary and HTML, explained in the disclosure, and never saved as a vintage by the console or the publisher; 12 months stays Ready; fiscal-year months before a short lookback fail the actuals check until they have data, instead of counting as zero; tenant workspace names and fallbacks; a billing account offered only when one EA or MCA account owns every subscription and each owner is confirmed; live setup per subscription, at an owning billing account, and the per-subscription fallback, all with an `Auto` first month; a fiscal year starting before a short lookback widens the live read; exports from a local folder; manual inputs; cancelling changes nothing; the period editor rescales or clamps; unnamed interactive runs sign in and open the tenant workspace, set-up workspaces open without asking again, and named workspaces skip sign-in |
+| Cost Details source | `Forecast.CostDetails.Tests.ps1`, against a synthetic API: month planning and chunking; an `Auto` first month following the lookback window, the fiscal year's start, and a pinned window end; scope and settings validation; one POST per chunk with the exact path and body; status links on another host, scope, or operation refused; mismatched or missing manifest echoes rejected; NoDataFound; access and throttle failures; credential-free, redirect-free, size-checked downloads over loopback, including a stalled connection; closed months reused and the open month re-read after four hours; a longer lookback or earlier fiscal year reading only the new months, and a shorter one keeping them; final months beyond the API's reach kept while the window needs them; links never persisted; months kept after a failed refresh; outside-month charges reported; EA enrollment and MCA billing profile joined at the boundary. Safety: only that file may POST, only to `generateCostDetailsReport`, only from a partition read, with GET-only downloads |
 
 ## Checked against the FinOps toolkit sample
 

@@ -85,6 +85,20 @@ function Get-ForecastNormalizedRunRate {
     return ([decimal]$Row.RunRate * 30d) / [decimal]$Row.Days
 }
 
+function Get-ForecastFirstNeededMonth {
+    # The earliest month a forecast needs: the lookback window's first month,
+    # or the fiscal year's first month when the fiscal year started earlier,
+    # because those months count as actuals in the fiscal-year total.
+    param([Parameter(Mandatory)]$Settings, [Parameter(Mandatory)][datetime]$AsOf)
+    $end = Get-ForecastLastEligibleMonth -AsOf $AsOf -GraceDays ([int]$Settings.period.graceDays)
+    $pinned = [string]$Settings.period.windowEnd
+    if ($pinned -ne 'Auto' -and (Test-ForecastMonthKey -MonthKey $pinned) -and [string]::CompareOrdinal($pinned, $end) -lt 0) { $end = $pinned }
+    $first = Add-ForecastMonth -MonthKey $end -Count (1 - [math]::Max(1, [int]$Settings.period.lookbackMonths))
+    $fiscal = Get-ForecastFiscalYear -AsOf $AsOf -StartMonth ([int]$Settings.period.fiscalYearStartMonth) -Offset ([int]$Settings.period.fiscalYearOffset)
+    if ([string]::CompareOrdinal($fiscal.FirstMonth, $first) -lt 0) { $first = $fiscal.FirstMonth }
+    return $first
+}
+
 function Get-ForecastWindow {
     param([Parameter(Mandatory)]$Dataset, [Parameter(Mandatory)]$Settings, [Parameter(Mandatory)][datetime]$AsOf)
     $issues = [Collections.Generic.List[object]]::new()

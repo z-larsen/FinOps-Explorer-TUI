@@ -12,23 +12,46 @@ For the design, method details, and test coverage, see [forecast-design.md](fore
 
 - PowerShell 7 and the same Az modules FinOps Explorer uses.
 - Cost Management exports of **actual cost** or **FOCUS** data in CSV format (gzip is fine). Amortized exports are rejected because they spread purchases instead of showing what was billed; that includes an amortized file with no manifest, which is recognized from its content. Parquet isn't read.
-- At least **12 complete months** of history. The portal can backfill up to 13 months one month at a time; the [Exports Execute REST API](https://learn.microsoft.com/azure/cost-management-billing/costs/tutorial-improved-exports) goes back further. Set those up yourself; the forecast won't create them.
+- At least **12 complete months** of history for a forecast that can be marked Ready. With 3 to 11 months you get a **Preliminary** forecast (see [Short history](#short-history-preliminary-forecasts)). The portal can backfill exports up to 13 months one month at a time; the [Exports Execute REST API](https://learn.microsoft.com/azure/cost-management-billing/costs/tutorial-improved-exports) goes back further. Set those up yourself; the forecast won't create them.
 - **Storage Blob Data Reader** on the storage account the exports deliver to. A local copy of the export container (same folder layout, for example from AzCopy) works too, with no Azure access at all.
 
 No exports? If you have Cost Management read access at a subscription or billing scope, add a [Cost Details source](#read-cost-management-directly-cost-details) and the forecast requests the reports itself. Otherwise, switch the workspace to **manual inputs** and type in monthly totals from invoices.
 
 ## Start it
 
-From PowerShell 7, in the folder where you extracted FinOps Explorer:
+From PowerShell 7, in the folder where you extracted FinOps Explorer, run `Start-FinOpsExplorer` and pick **2 Pre-credit forecast and workload growth** at the first prompt, or start the forecast directly:
 
 ```powershell
 Import-Module .\FinOpsToolkit.psm1
-Start-FinOpsForecast -WorkspaceName contoso-fy27
+Start-FinOpsForecast
 ```
 
-You can also run `Start-FinOpsExplorer` and pick **2 Pre-credit forecast and workload growth** at the first prompt. Explorer runs started with `-NonInteractive`, `-Scans`, or `-DataSource` skip that prompt and behave as before.
+Explorer runs started with `-NonInteractive`, `-Scans`, or `-DataSource` skip that prompt and behave as before.
 
-Use one workspace per customer or scope. A workspace keeps settings, review decisions, cached export history, and saved forecasts under `FinOpsToolkit\Explorer\Forecast\<name>` in your local application data, readable only by you.
+### Guided setup
+
+Without a workspace name, the forecast signs you in first, using the same tenant and subscription picker as Explorer's scans. It then opens a workspace named after the signed-in tenant, such as `contoso-1a2b3c4d`, so one customer's saved forecasts and review decisions never mix with another's. You can accept the name or type another.
+
+A new workspace goes straight into a few questions:
+
+1. **Where the history comes from**:
+   - **Live from Cost Management**, using your sign-in. No exports are needed; see [Cost Details](#read-cost-management-directly-cost-details).
+   - **Exports**: find them for the selected subscriptions and the management groups and billing accounts above them, name a storage account, or point at a local copy.
+   - **Monthly totals** you type in.
+2. **How many months of history**: 3 to 12 live, up to 36 from exports. Twelve months can give a Ready forecast; fewer gives a Preliminary one.
+3. **The fiscal year's first month.** If the fiscal year started before the lookback window, the history also reaches back to its first month, because those months are actuals in the year's total.
+
+It then saves the settings and offers to refresh right away. For live reads, it says how many reports the first refresh requests.
+
+For live reads of up to three subscriptions, each subscription gets one report per month. With more, guided setup looks for the one EA or MCA billing account that owns all of them and offers to read there, so one set of weekly reports covers every subscription. Reading at a billing account needs a billing reader role. If the subscriptions belong to more than one account, or this sign-in can't confirm the owner of each, each subscription is read separately.
+
+Live sources follow the forecast period: their first month is **AUTO**, so changing the lookback or fiscal year in **3 Period** changes what the next refresh reads.
+
+Run it again any time with **G** on the review page. It replaces the source, scope, history length, and fiscal year. Assumptions, scheduled items, workloads, review decisions, and saved forecasts are kept. Opening a workspace that's already set up asks whether to open it or set it up again.
+
+To pick the workspace yourself, name it with `Start-FinOpsForecast -WorkspaceName contoso-fy27`. An empty named workspace also starts guided setup. Non-interactive runs and runs with `-ConfigPath` use the `default` workspace unless you name one.
+
+A workspace keeps settings, review decisions, cached export history, and saved forecasts under `FinOpsToolkit\Explorer\Forecast\<name>` in your local application data, readable only by you.
 
 ## The Setup & Review page
 
@@ -44,16 +67,23 @@ Everything happens on one page. Each line shows a status: **OK**, **CHECK** (a w
 | 6 Reconciliation | Each month's raw export total against what was included and excluded |
 | 7 Refresh | Refresh history; refresh now |
 
-Other keys: **R** refresh, **W** workloads, **F** forecast and save, **P** preview report, **I** manual inputs, **Q** quit.
+Other keys: **R** refresh, **W** workloads, **F** forecast and save, **P** preview report, **I** manual inputs, **G** guided setup, **Q** quit.
 
-A typical first run:
+After guided setup, a typical first run is:
 
-1. **1 Source**: press **D** to discover exports, **A**/**L** to add a location, or **C** to add a Cost Details scope. If the history spans an EA-to-MCA move, press **T** and enter the transition date.
-2. **2 Scope**: pick subscriptions or enter the billing profile ID.
-3. **3 Period**: set the fiscal-year start month.
-4. **R** to read the exports. Later refreshes only read runs that are new or changed.
-5. **5 Exceptions**: work through anything marked REQUIRED.
-6. **F** to save the forecast. It's only saved when the status is **READY**.
+1. **R** to read the history, if you didn't refresh during setup. Later refreshes only read what's new or changed.
+2. **5 Exceptions**: work through anything marked REQUIRED.
+3. **F** to save the forecast. It's only saved when the status is **READY**.
+
+To set things up by hand instead, use **1 Source**: press **D** to discover exports, **A**/**L** to add a location, or **C** to add a Cost Details scope. If the history spans an EA-to-MCA move, press **T** there and enter the transition date. Then pick the scope in **2 Scope** and the fiscal year in **3 Period**.
+
+## Short history: Preliminary forecasts
+
+With 3 to 11 months of history, the forecast runs the same method on the months you have and marks the result **Preliminary**. The status line shows it in yellow, every report says so, and the method disclosure explains it. A Preliminary forecast can't be saved as a vintage; use **P** for a preview report.
+
+Treat it as an early indication, not a number to commit to. N months give N − 1 month-to-month changes, so 3 months estimate growth from just 2 changes, and the range reflects only those. The minimum number of retained comparisons scales with the history, keeping the 8-of-11 share of a 12-month lookback. Raise the lookback to 12 in **3 Period** once enough months exist, and the same workspace can become Ready. A live source with its first month set to **AUTO** reads the extra months on the next refresh.
+
+A short lookback doesn't shorten the fiscal year. Months of the fiscal year before the lookback window still count as actuals in the total, so they need data too. Until they have it, the **Fiscal-year actuals before the lookback** check fails, rather than counting them as zero.
 
 ## Read Cost Management directly (Cost Details)
 
@@ -63,7 +93,7 @@ When nobody has set up exports, or you can't reach the files, a **Cost Details**
 
 **Scopes.** A subscription (`/subscriptions/<id>`), an EA enrollment, department, or enrollment account, or an MCA billing account, billing profile, invoice section, or customer (`/providers/Microsoft.Billing/billingAccounts/<id>/...`). Management groups and resource groups aren't supported by the API. Only EA and MCA agreements work; pay-as-you-go and Visual Studio subscriptions don't.
 
-**How far back.** The API reaches 13 months, so the source requests every whole month it can still reach, plus the current month through yesterday. That's 12 complete months, which is what the forecast needs. In the first few days of a month, until last month passes the grace period, the forecast window still starts one month further back than the API can reach. Months an earlier refresh already read are kept for that reason, so refresh at least once a month. A workspace whose very first refresh lands in those days is a month short until the grace period passes. Use **First month** and **Last month** to narrow the range. Older history needs exports.
+**How far back.** The API reaches 13 months. With **First month** set to **AUTO**, the default, the source requests what the forecast period needs: from the start of the lookback window, or from the fiscal year's first month if that's earlier, plus the current month through yesterday. Set **First month** to a month (yyyy-MM) to fix it, or to NONE to request every whole month the API can still reach. **Last month** narrows the end. A 12-month lookback needs 12 complete months, which the API can return. In the first few days of a month, until last month passes the grace period, the forecast window still starts one month further back than the API can reach. Months an earlier refresh already read are kept for that reason, so refresh at least once a month. A workspace whose very first refresh lands in those days is a month short until the grace period passes. Older history needs exports.
 
 **After an EA-to-MCA move**, EA history stays in the EA enrollment and MCA history starts in the billing profile. Add one source for each, set **T** to the transition date, and give the EA source a last month and the MCA source a first month around it. See [the sample config](../samples/forecast/forecast-config.costdetails.sample.json). Each side needs its own access: a subscription that moved to MCA usually shows only its MCA costs at subscription scope.
 
@@ -139,7 +169,7 @@ Record review decisions interactively first, then:
 Start-FinOpsForecast -WorkspaceName contoso-fy27 -NonInteractive
 ```
 
-It refreshes, writes reports, and saves a vintage if the forecast is Ready. If it isn't, the reports are labeled **NotReady**, no vintage is saved, and a non-terminating error lists the failing checks. `-ConfigPath` loads settings from JSON first; see [the sample config](../samples/forecast/forecast-config.sample.json).
+It refreshes, writes reports, and saves a vintage if the forecast is Ready. If it isn't, the reports are labeled **NotReady**, or **Preliminary** for a lookback under 12 months. No vintage is saved, and a non-terminating error lists the failing checks or explains the short history. `-ConfigPath` loads settings from JSON first; see [the sample config](../samples/forecast/forecast-config.sample.json).
 
 ## Reading the numbers
 

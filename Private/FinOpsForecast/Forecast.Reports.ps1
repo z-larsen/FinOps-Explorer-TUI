@@ -51,6 +51,9 @@ function Get-ForecastDisclosure {
     $lines.Add('')
     $lines.Add('LOOKBACK AND COMPARISONS')
     $lines.Add("- Window: $($window.First) to $($window.Last) ($(@($window.Rows).Count) months). The latest month eligible as final is $($window.LastEligible) (grace $($Settings.period.graceDays) days after month end).")
+    if ($Readiness.Status -eq 'Preliminary' -or [int]$Settings.period.lookbackMonths -lt $script:ForecastReadyMonths) {
+        $lines.Add("- PRELIMINARY: only $($Settings.period.lookbackMonths) months of history ($([int]$Settings.period.lookbackMonths - 1) month-to-month changes) were used. Growth and its range rest on very few observations, so treat this as an early indication, not a forecast to commit to. A Ready forecast needs $($script:ForecastReadyMonths) months.")
+    }
     $lines.Add('- Each month is normalized to a 30-day run rate: cost / days in month x 30, using Usage charges. Unused reservation and savings plan charges appear only in amortized cost, which isn''t accepted.')
     $lines.Add("- $($comparisons.Expected) adjacent-month comparisons; $(@($comparisons.Items | Where-Object Retained).Count) retained, $(@($comparisons.Items | Where-Object Status -EQ 'Undefined').Count) undefined, $(@($comparisons.Items | Where-Object Flagged).Count) flagged.")
     $lines.Add("- Flag rule: |change - median| > max($(Format-ForecastDecimal $comparisons.K) x scaled MAD, $(Format-ForecastPercent $comparisons.MinimumDeviation)). Median $(Format-ForecastPercent $comparisons.Median); threshold $(Format-ForecastPercent $comparisons.Threshold).")
@@ -93,15 +96,22 @@ function Get-ForecastDisclosure {
     return $lines.ToArray()
 }
 
+function Get-ForecastDisplayLabels {
+    # Labels shown beside the status, without repeating a Preliminary status.
+    param([Parameter(Mandatory)]$Readiness)
+    return , @($Readiness.Labels | Where-Object { $_ -and -not ($Readiness.Status -eq 'Preliminary' -and $_ -like 'Preliminary*') })
+}
+
 function Get-ForecastSummaryLines {
     param([Parameter(Mandatory)]$Model, [Parameter(Mandatory)]$Dataset, [Parameter(Mandatory)]$Readiness, $Workloads, [string]$ScopeLabel)
     $currency = $Dataset.Currency
     $projection = $Model.Projection
+    $statusLabels = Get-ForecastDisplayLabels -Readiness $Readiness
     $lines = [Collections.Generic.List[string]]::new()
     $lines.Add('FinOps Explorer - pre-credit forecast')
     $lines.Add("Generated: $([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm', $script:ForecastInvariant)) UTC; as of $(([datetime]$Model.AsOf).ToString('yyyy-MM-dd', $script:ForecastInvariant))")
     $lines.Add("Scope: $(ConvertTo-ForecastSafeText $ScopeLabel 200)")
-    $lines.Add("Status: $($Readiness.Status)$(if ($Readiness.Labels.Count) { " ($($Readiness.Labels -join ', '))" })")
+    $lines.Add("Status: $($Readiness.Status)$(if ($statusLabels.Count) { " ($($statusLabels -join ', '))" })")
     $lines.Add('')
     $lines.Add("$($projection.FiscalYear.Label) ($($projection.FiscalYear.FirstMonth) to $($projection.FiscalYear.LastMonth)), pre-credit, $currency")
     $lines.Add("  Central estimate:  $(Format-ForecastAmount $projection.TotalCentral $currency)")

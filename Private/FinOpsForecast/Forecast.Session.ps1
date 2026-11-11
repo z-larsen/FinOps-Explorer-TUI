@@ -26,6 +26,10 @@ function Update-ForecastExportCache {
     $checkpoint = [Collections.Generic.List[object]]::new()
     $read = 0; $reused = 0; $incomplete = 0
     $notes = [Collections.Generic.List[string]]::new()
+    # Cost Details sources with a fromMonth of Auto read from here.
+    $earliestMonth = ''
+    try { $earliestMonth = Get-ForecastFirstNeededMonth -Settings $Settings -AsOf $Now }
+    catch { Write-Verbose "The forecast period's first month isn't available: $($_.Exception.Message)" }
     try {
         $sourceIndex = 0
         foreach ($source in @($Settings.sources)) {
@@ -35,7 +39,7 @@ function Update-ForecastExportCache {
             # Cost Details records carry their own source's profile hash; see Get-ForecastIngestProfile.
             $sourceProfile = $ingestProfile
             if ($costDetails) {
-                $runs = Get-ForecastCostDetailsRuns -Source $source -Now $Now
+                $runs = Get-ForecastCostDetailsRuns -Source $source -Now $Now -EarliestMonth $earliestMonth
                 $sourceProfile = [pscustomobject]@{ Values = $ingestProfile.Values; Hash = [string]$ingestProfile.SourceHashes[[string]$source.id] }
             }
             else {
@@ -286,6 +290,13 @@ function Invoke-FinOpsForecast {
     )
     if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'The forecast requires PowerShell 7 or later.' }
     $script:FinOpsRichConsole = $null
+    # Interactive runs without a named workspace or config sign in first and
+    # use the signed-in tenant's workspace, so customers never share one.
+    if (-not $NonInteractive -and -not $PSBoundParameters.ContainsKey('WorkspaceName') -and -not $ConfigPath) {
+        $tenantRoot = Open-ForecastTenantWorkspace -WorkspacePath $WorkspacePath -AsOf $AsOf
+        if ($tenantRoot) { Show-ForecastSetupReview -Root $tenantRoot -AsOf $AsOf -OutputPath $OutputPath }
+        return
+    }
     $root = Get-ForecastWorkspaceRoot -WorkspaceName $WorkspaceName -WorkspacePath $WorkspacePath
     if ($ConfigPath) {
         if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { throw "The config file wasn't found: $ConfigPath" }
@@ -293,6 +304,7 @@ function Invoke-FinOpsForecast {
         Save-ForecastStoredSettings -Root $root -Settings (ConvertTo-ForecastSettings -Loaded $loaded)
     }
     if (-not $NonInteractive) {
+        if (-not (Test-ForecastWorkspaceConfigured -Root $root)) { $null = Start-ForecastGuidedSetup -Root $root -AsOf $AsOf }
         Show-ForecastSetupReview -Root $root -AsOf $AsOf -OutputPath $OutputPath
         return
     }
@@ -305,8 +317,14 @@ function Invoke-FinOpsForecast {
     $session = Invoke-ForecastEvaluation -Root $root -AsOf $AsOf
     $published = Publish-ForecastOutputs -Session $session -OutputPath $OutputPath -SaveVintage:($session.Readiness.Ready)
     if (-not $session.Readiness.Ready) {
-        $failing = @($session.Readiness.Checks | Where-Object Status -EQ 'Fail' | ForEach-Object { "$($_.Name): $($_.Detail)" })
-        Write-Error -Message "The forecast isn't Ready. $($failing -join ' | ') Reports were written to $($published.ReportDirectory) and labeled NotReady; no vintage was saved." -ErrorId 'FinOpsForecastNotReady' -Category InvalidData
+        $message = if ($session.Readiness.Status -eq 'Preliminary') {
+            "The forecast is Preliminary: $($session.Settings.period.lookbackMonths) months of history, and a Ready forecast needs $($script:ForecastReadyMonths). Reports were written to $($published.ReportDirectory) and labeled Preliminary; no vintage was saved."
+        }
+        else {
+            $failing = @($session.Readiness.Checks | Where-Object Status -EQ 'Fail' | ForEach-Object { "$($_.Name): $($_.Detail)" })
+            "The forecast isn't Ready. $($failing -join ' | ') Reports were written to $($published.ReportDirectory) and labeled NotReady; no vintage was saved."
+        }
+        Write-Error -Message $message -ErrorId 'FinOpsForecastNotReady' -Category InvalidData
     }
     [pscustomobject]@{
         Ready = $session.Readiness.Ready; Status = $session.Readiness.Status; Labels = $session.Readiness.Labels

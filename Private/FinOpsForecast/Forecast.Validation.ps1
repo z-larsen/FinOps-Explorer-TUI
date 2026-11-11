@@ -63,6 +63,20 @@ function Test-ForecastReadiness {
     $monthDetail = if ($notUsable.Count) { (@($notUsable | ForEach-Object { "$($_.Month) $($_.Status)$(if ($_.Note) { " ($($_.Note))" })" }) -join '; ') } else { "All $($windowMonths.Count) months from $($window.First) to $($window.Last) are complete." }
     $checks.Add((New-ForecastCheck -Id 'MONTHS' -Name "Complete months ($($Settings.period.lookbackMonths) required)" -Status $(if ($notUsable.Count) { 'Fail' } else { 'Pass' }) -Detail $monthDetail))
 
+    # A short lookback is a deliberate choice, so it warns instead of failing,
+    # but the forecast can't be Ready or saved as a vintage.
+    $lookback = [int]$Settings.period.lookbackMonths
+    $preliminary = $lookback -lt $script:ForecastReadyMonths
+    if ($preliminary) { $labels.Add("Preliminary ($lookback months of history)") }
+    $historyDetail = if ($preliminary) { "$lookback months of history give $($lookback - 1) month-to-month changes. A Ready forecast needs $($script:ForecastReadyMonths) months; this one is Preliminary and can't be saved as a vintage." } else { "$lookback months of history." }
+    $checks.Add((New-ForecastCheck -Id 'HISTORY' -Name 'History length' -Status $(if ($preliminary) { 'Warn' } else { 'Pass' }) -Detail $historyDetail))
+
+    # A lookback shorter than the fiscal year so far leaves fiscal-year months
+    # outside the window; without data they'd add zero to the total.
+    $beforeWindow = @($Model.Projection.MissingActualMonths | Where-Object { $_ -and [string]::CompareOrdinal([string]$_, [string]$window.First) -lt 0 })
+    $actualsDetail = if ($beforeWindow.Count) { "No final data for $($beforeWindow -join ', '), which are in $($Model.Projection.FiscalYear.Label) before the lookback window, so they'd count as zero. Read the history back to $($beforeWindow[0]): refresh a live source, or add exports or inputs for those months." } else { 'Every fiscal-year month before the lookback window has final data.' }
+    $checks.Add((New-ForecastCheck -Id 'ACTUALS' -Name 'Fiscal-year actuals before the lookback' -Status $(if ($beforeWindow.Count) { 'Fail' } else { 'Pass' }) -Detail $actualsDetail))
+
     $comparisons = @($Model.Comparisons.Items)
     $missingComparisons = @($comparisons | Where-Object Status -EQ 'MissingData')
     $accounted = $comparisons.Count -eq $Model.Comparisons.Expected -and $missingComparisons.Count -eq 0
@@ -124,8 +138,8 @@ function Test-ForecastReadiness {
 
     $failed = @($checks | Where-Object Status -EQ 'Fail')
     [pscustomobject]@{
-        Ready = $failed.Count -eq 0
-        Status = if ($failed.Count) { 'NotReady' } else { 'Ready' }
+        Ready = $failed.Count -eq 0 -and -not $preliminary
+        Status = if ($failed.Count) { 'NotReady' } elseif ($preliminary) { 'Preliminary' } else { 'Ready' }
         Checks = $checks.ToArray()
         Labels = $labels.ToArray()
         PendingRequired = $pendingRequired

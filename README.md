@@ -406,18 +406,24 @@ Details API) at a subscription or billing scope, up to 13 months back.
 
 ```powershell
 . .\Public\Start-FinOpsForecast.ps1
-Start-FinOpsForecast -WorkspaceName contoso-fy27
+Start-FinOpsForecast
 ```
 
 You can also choose **Pre-credit forecast and workload growth** at the first
 prompt of `Start-FinOpsExplorer`. Scripted Explorer runs (`-NonInteractive`,
 `-Scans`, or `-DataSource`) skip that prompt.
 
+Guided setup signs you in, opens a workspace for the signed-in tenant, and asks
+three things: whether to read live from Cost Management, from exports, or from
+totals you type in; how many months of history (3 to 12 live, up to 36 from
+exports); and when the fiscal year starts. Then it refreshes. Fewer than 12
+months gives a Preliminary forecast that's reported but never saved.
+
 The forecast reads Azure data only; the one request it sends asks Cost
 Management to generate a temporary report, and it never creates exports,
-changes permissions, or provisions anything. It needs 12 or more complete
-months, asks for a decision whenever the data is ambiguous, and won't save a
-forecast until every required check passes. See the [usage guide](docs/forecast.md) and the
+changes permissions, or provisions anything. A Ready forecast needs 12 or more
+complete months. The forecast asks for a decision whenever the data is
+ambiguous, and won't save a forecast until every required check passes. See the [usage guide](docs/forecast.md) and the
 [design and integration plan](docs/forecast-design.md).
 
 ## Reports and privacy

@@ -78,6 +78,19 @@ Describe 'Forecast console' {
         ($script:Console.Text -join "`n") | Should -Match '7-day reports, earliest to 2026-10 \| billingProfiles/BP-SYNTH-01'
     }
 
+    It 'Starts a new Cost Details source at what the forecast period needs by default' {
+        $root = Get-Workspace -Name 'console-costdetails-auto'
+        InModuleScope FinOpsForecast -Parameters @{ Root = $root; Settings = (New-TestSettings) } { Save-ForecastStoredSettings -Root $Root -Settings $Settings }
+        Set-TestAnswers @('C', $script:ProfileScope, '', '', '', '', '', '', 'B')
+        InModuleScope FinOpsForecast -Parameters @{ Root = $root } { Edit-ForecastSources -Root $Root }
+        Get-RedLines | Should -BeNullOrEmpty
+        $script:Answers.Count | Should -Be 0
+        $source = @((InModuleScope FinOpsForecast -Parameters @{ Root = $root } { Get-ForecastStoredSettings -Root $Root }).sources)[0]
+        $source.fromMonth | Should -Be 'Auto'
+        $source.toMonth | Should -Be ''
+        ($script:Console.Text -join "`n") | Should -Match '7-day reports, auto to current'
+    }
+
     It 'Enters, approves, and forecasts manual inputs' {
         $root = Get-Workspace -Name 'console-manual'
         $settings = New-TestSettings -Mode 'Manual'

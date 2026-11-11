@@ -20,7 +20,9 @@ param()
 #   generateCostDetailsReport, which creates a temporary report, not an
 #   Azure resource;
 # - GETs only to the status link that request returns, after checking it's
-#   on the signed-in cloud's Resource Manager host and for the same scope;
+#   on the signed-in cloud's Resource Manager host and for the same scope,
+#   and to the billing account list, which guided setup uses to find the
+#   one EA or MCA account that owns every selected subscription;
 # - report downloads without any Azure credential. Cost Management returns
 #   short-lived SAS links. They stay in local variables, are never written
 #   to messages, the cache, or reports, and only HTTPS blob endpoints of the
@@ -74,8 +76,10 @@ function Get-ForecastCostDetailsChunkDays {
 function Get-ForecastCostDetailsMonths {
     # Whole months the API can still return (a day inside its 13-month
     # limit), then the current month through yesterday, narrowed by the
-    # source's optional fromMonth and toMonth.
-    param([Parameter(Mandatory)]$Source, [Parameter(Mandatory)][datetime]$Now)
+    # source's optional fromMonth and toMonth. A fromMonth of Auto starts at
+    # EarliestMonth, the first month the forecast period needs, so changing
+    # the lookback or fiscal year changes what the next refresh reads.
+    param([Parameter(Mandatory)]$Source, [Parameter(Mandatory)][datetime]$Now, [string]$EarliestMonth)
     $today = (ConvertFrom-ForecastDate -Value $Now).Date
     $reach = $today.AddMonths(-$script:ForecastCostDetailsReachMonths).AddDays(1)
     $first = ConvertTo-ForecastMonthKey -Date $reach
@@ -83,6 +87,7 @@ function Get-ForecastCostDetailsMonths {
     $yesterday = $today.AddDays(-1)
     $last = ConvertTo-ForecastMonthKey -Date $yesterday
     $from = [string]$Source.fromMonth
+    if ($from -eq 'Auto') { $from = $EarliestMonth }
     $to = [string]$Source.toMonth
     if ((Test-ForecastMonthKey -MonthKey $from) -and [string]::CompareOrdinal($from, $first) -gt 0) { $first = $from }
     if ((Test-ForecastMonthKey -MonthKey $to) -and [string]::CompareOrdinal($to, $last) -lt 0) { $last = $to }
@@ -111,13 +116,13 @@ function Get-ForecastCostDetailsChunks {
 function Get-ForecastCostDetailsRuns {
     # One run per month, one partition per chunk. Nothing is requested here;
     # each chunk's report is generated when ingestion reads its partition.
-    param([Parameter(Mandatory)]$Source, [Parameter(Mandatory)][datetime]$Now)
+    param([Parameter(Mandatory)]$Source, [Parameter(Mandatory)][datetime]$Now, [string]$EarliestMonth)
     $scope = Get-ForecastCostDetailsScope -Scope ([string]$Source.scope)
     $days = Get-ForecastCostDetailsChunkDays -Source $Source
     $submitted = ConvertFrom-ForecastDate -Value $Now
     $culture = $script:ForecastInvariant
     $stamp = $submitted.ToString('yyyyMMddTHHmmssZ', $culture)
-    $runs = foreach ($plan in (Get-ForecastCostDetailsMonths -Source $Source -Now $Now)) {
+    $runs = foreach ($plan in (Get-ForecastCostDetailsMonths -Source $Source -Now $Now -EarliestMonth $EarliestMonth)) {
         $parts = foreach ($chunk in (Get-ForecastCostDetailsChunks -Start $plan.Start -End $plan.End -Days $days)) {
             $name = 'costdetails/{0}/{1}-{2}.csv' -f $plan.Month, $chunk.Start.ToString('yyyyMMdd', $culture), $chunk.End.ToString('yyyyMMdd', $culture)
             [pscustomobject]@{ Declared = $name; Name = $name; ByteCount = $null; RowCount = $null; Length = $null; LastModified = $null }
@@ -174,7 +179,9 @@ function Get-ForecastCostDetailsRetainedKeys {
     # Final months this source read earlier that the API can no longer reach.
     # Until last month passes its grace period, the forecast window still
     # starts one month beyond that reach, so these months stay in the cache.
-    # Months outside the source's fromMonth and toMonth aren't kept. Dropped
+    # Months outside the source's fromMonth and toMonth aren't kept; with a
+    # fromMonth of Auto, earlier final months are, so lowering the lookback
+    # and raising it again doesn't lose months the API can't return. Dropped
     # counts final months that were read under a different tag key, boundary,
     # or source setting; they can't be read again.
     param(
@@ -517,4 +524,44 @@ function Read-ForecastCostDetailsPartition {
     }
     if ($buffers.Count -eq 1) { return , $buffers[0] }
     return , (Join-ForecastCostDetailsFiles -Files $buffers.ToArray())
+}
+
+# -- Billing scopes ----------------------------------------------------------
+function Get-ForecastCostDetailsBillingScopes {
+    # The EA or MCA billing account that owns every selected subscription, as
+    # a Cost Details scope. One read-only list call here; Explorer's
+    # Get-FinOpsBillingScope confirms each subscription's owner. Returns
+    # nothing when billing data can't be read, any subscription's owner isn't
+    # confirmed, or the subscriptions belong to more than one account, so a
+    # billing-account read never misses a selected subscription.
+    param([Parameter(Mandatory)][object[]]$Subscriptions)
+    $billingPath = '/providers/Microsoft.Billing/billingAccounts?api-version=2024-04-01'
+    $owners = $null
+    try {
+        $response = Invoke-AzRestMethodWithRetry -Path $billingPath -Method GET -MaxRetries 2 -TimeoutSeconds 60
+        if ([int]$response.StatusCode -ne 200) { return , [object[]]@() }
+        $listed = Get-FinOpsListResult -FirstResponse $response -Context 'billing accounts for the forecast'
+        $accounts = @($listed.value | Where-Object { $_ -and [string]$_.name -match '^[A-Za-z0-9_.():-]+$' -and [string]$_.id -eq "/providers/Microsoft.Billing/billingAccounts/$($_.name)" })
+        if ($accounts.Count -eq 0) { return , [object[]]@() }
+        $owners = Get-FinOpsBillingScope -BillingAccounts $accounts -Subscriptions $Subscriptions
+    }
+    catch {
+        Write-Verbose "Billing accounts couldn't be read: $($_.Exception.Message)"
+        return , [object[]]@()
+    }
+    $owning = @($owners.Accounts | Where-Object { $_ })
+    if (-not $owners.Resolved -or $owners.CoverageIncomplete -or $owning.Count -ne 1) {
+        Write-Verbose "No single billing account confirmed for all $(@($Subscriptions).Count) subscriptions: $(@($owning).Count) owner(s); $([string]$owners.Reason)"
+        return , [object[]]@()
+    }
+    $account = $owning[0]
+    $agreement = switch -Regex ([string]$account.properties.agreementType) {
+        '^(?i)EnterpriseAgreement$' { 'EA' }
+        '^(?i)MicrosoftCustomerAgreement$' { 'MCA' }
+        default { $null }
+    }
+    if (-not $agreement) { return , [object[]]@() }
+    try { $scope = (Get-ForecastCostDetailsScope -Scope ([string]$account.id)).Path } catch { return , [object[]]@() }
+    $name = ConvertTo-ForecastSafeText ([string]$account.properties.displayName) 80
+    return , @([pscustomobject]@{ Scope = $scope; Name = $(if ($name) { $name } else { [string]$account.name }); Agreement = $agreement })
 }

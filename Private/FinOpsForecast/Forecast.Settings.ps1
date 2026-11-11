@@ -15,6 +15,10 @@ param()
 ###########################################################################
 
 $script:ForecastSettingsVersion = 1
+# A forecast can be Ready only with at least this many complete months.
+# Shorter lookbacks (down to 3) produce a Preliminary forecast.
+$script:ForecastReadyMonths = 12
+$script:ForecastMinimumLookbackMonths = 3
 
 function New-ForecastDefaultSettings {
     [pscustomobject]@{
@@ -66,13 +70,20 @@ function Get-ForecastMethodNumber {
     return $value
 }
 
+function Get-ForecastDefaultMinimumRetained {
+    # The default keeps the 8-of-11 share of a 12-month lookback for any
+    # lookback length, so a shorter history isn't held to all-or-nothing.
+    param([Parameter(Mandatory)][int]$LookbackMonths)
+    return [int][math]::Max(1, [math]::Floor(($LookbackMonths - 1) * 8 / 11))
+}
+
 function Test-ForecastSettings {
     param([Parameter(Mandatory)]$Settings)
     $issues = [Collections.Generic.List[object]]::new()
     $period = $Settings.period
     if ([int]$period.fiscalYearStartMonth -lt 1 -or [int]$period.fiscalYearStartMonth -gt 12) { $issues.Add((New-ForecastIssue -Code 'SET-FY' -Message 'Fiscal year start month must be 1 to 12.')) }
     if ([int]$period.fiscalYearOffset -notin 0, 1) { $issues.Add((New-ForecastIssue -Code 'SET-FYOFFSET' -Message 'Fiscal year must be the current (0) or next (1) fiscal year.')) }
-    if ([int]$period.lookbackMonths -lt 12 -or [int]$period.lookbackMonths -gt 36) { $issues.Add((New-ForecastIssue -Code 'SET-LOOKBACK' -Message 'The lookback must be 12 to 36 complete months.')) }
+    if ([int]$period.lookbackMonths -lt $script:ForecastMinimumLookbackMonths -or [int]$period.lookbackMonths -gt 36) { $issues.Add((New-ForecastIssue -Code 'SET-LOOKBACK' -Message "The lookback must be $($script:ForecastMinimumLookbackMonths) to 36 complete months. Under $($script:ForecastReadyMonths), the forecast is Preliminary.")) }
     if ([int]$period.graceDays -lt 0 -or [int]$period.graceDays -gt 10) { $issues.Add((New-ForecastIssue -Code 'SET-GRACE' -Message 'The finalization grace period must be 0 to 10 days.')) }
     if ([int]$period.staleAfterDays -lt 1) { $issues.Add((New-ForecastIssue -Code 'SET-STALE' -Message 'Stale-data age must be at least 1 day.')) }
     if ([string]$period.windowEnd -ne 'Auto' -and -not (Test-ForecastMonthKey -MonthKey ([string]$period.windowEnd))) { $issues.Add((New-ForecastIssue -Code 'SET-WINDOWEND' -Message "The window end must be Auto or a month (yyyy-MM).")) }
@@ -141,7 +152,9 @@ function Test-ForecastSourceDefinition {
                 $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Cost Details source '$label' needs 1 to 31 days per report."))
             }
             foreach ($name in 'fromMonth', 'toMonth') {
-                if ([string]$Source.$name -and -not (Test-ForecastMonthKey -MonthKey ([string]$Source.$name))) { $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Cost Details source '$label' has an invalid $name; use yyyy-MM.")) }
+                # A fromMonth of Auto follows the forecast period; see Get-ForecastCostDetailsMonths.
+                if ($name -eq 'fromMonth' -and [string]$Source.$name -eq 'Auto') { continue }
+                if ([string]$Source.$name -and -not (Test-ForecastMonthKey -MonthKey ([string]$Source.$name))) { $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Cost Details source '$label' has an invalid $name; use yyyy-MM$(if ($name -eq 'fromMonth') { ' or Auto' }).")) }
             }
             if ((Test-ForecastMonthKey -MonthKey ([string]$Source.fromMonth)) -and (Test-ForecastMonthKey -MonthKey ([string]$Source.toMonth)) -and [string]::CompareOrdinal([string]$Source.fromMonth, [string]$Source.toMonth) -gt 0) {
                 $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Cost Details source '$label' has a first month after its last month."))

@@ -44,10 +44,10 @@ Describe 'Forecast safety' {
         @($violations) | Should -BeNullOrEmpty
     }
 
-    It 'Posts only to generateCostDetailsReport and reads only its status link' {
+    It 'Posts only to generateCostDetailsReport and reads only its status link and the billing account list' {
         $path = (Join-Path $script:RepoRoot "Private/FinOpsForecast/$script:CostDetailsFile")
         $calls = @((Get-TestAst $path).FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Invoke-AzRestMethodWithRetry' }, $true))
-        $calls.Count | Should -Be 2
+        $calls.Count | Should -Be 3
         $described = foreach ($call in $calls) {
             $elements = $call.CommandElements
             $values = @{}
@@ -56,9 +56,12 @@ Describe 'Forecast safety' {
             }
             "$($values['Method'])=$($values['Path'])"
         }
-        @($described | Sort-Object) | Should -Be @('GET=$pollPath', 'POST=$requestPath')
+        @($described | Sort-Object) | Should -Be @('GET=$billingPath', 'GET=$pollPath', 'POST=$requestPath')
         $text = [IO.File]::ReadAllText($path)
         [regex]::Matches($text, '-Method\s+[''"]?POST\b', 'IgnoreCase').Count | Should -Be 1
+        $billingAssignments = [regex]::Matches($text, '\$billingPath\s*=\s*(.+)')
+        $billingAssignments.Count | Should -Be 1
+        $billingAssignments[0].Groups[1].Value.Trim() | Should -BeExactly "'/providers/Microsoft.Billing/billingAccounts?api-version=2024-04-01'"
         $assignments = [regex]::Matches($text, '\$requestPath\s*=\s*(.+)')
         $assignments.Count | Should -Be 1
         $assignments[0].Groups[1].Value | Should -Match ([regex]::Escape('/providers/Microsoft.CostManagement/generateCostDetailsReport?api-version='))

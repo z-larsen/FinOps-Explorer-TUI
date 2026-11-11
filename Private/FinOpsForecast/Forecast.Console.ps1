@@ -99,8 +99,12 @@ function Show-ForecastSetupReview {
         if ($session) {
             $readiness = $session.Readiness
             $failing = @($readiness.Checks | Where-Object Status -EQ 'Fail').Count
-            $statusText = if ($readiness.Ready) { 'READY' } else { "NOT READY ($failing check$(if ($failing -ne 1) { 's' }) failing)" }
-            Write-FinOpsConsole "  Status: $statusText$(if ($readiness.Labels.Count) { "  [$($readiness.Labels -join ', ')]" })" -ForegroundColor $(if ($readiness.Ready) { 'Green' } else { 'Red' })
+            $statusText = if ($readiness.Ready) { 'READY' }
+            elseif ($readiness.Status -eq 'Preliminary') { "PRELIMINARY ($($session.Settings.period.lookbackMonths) months of history; $($script:ForecastReadyMonths) are needed for Ready)" }
+            else { "NOT READY ($failing check$(if ($failing -ne 1) { 's' }) failing)" }
+            $statusColor = if ($readiness.Ready) { 'Green' } elseif ($readiness.Status -eq 'Preliminary') { 'Yellow' } else { 'Red' }
+            $statusLabels = Get-ForecastDisplayLabels -Readiness $readiness
+            Write-FinOpsConsole "  Status: $statusText$(if ($statusLabels.Count) { "  [$($statusLabels -join ', ')]" })" -ForegroundColor $statusColor
             Write-FinOpsConsole ''
             $settings = $session.Settings
             $dataset = $session.Dataset
@@ -109,7 +113,7 @@ function Show-ForecastSetupReview {
             else { "$(@($settings.sources).Count) export source(s); $(@($dataset.Runs).Count) run-month(s) selected; $(@($dataset.Runs | Where-Object { -not $_.Final }).Count) not final" }
             Write-ForecastSectionLine '1' 'Source' $sourceSummary (Get-ForecastCheckStatus $readiness @('SOURCE', 'CURRENCY', 'BOUNDARY'))
             Write-ForecastSectionLine '2' 'Scope' $session.ScopeLabel (Get-ForecastCheckStatus $readiness @('SETTINGS', 'POPULATION'))
-            Write-ForecastSectionLine '3' 'Period' "$($model.FiscalYear.Label) ($($model.FiscalYear.FirstMonth) to $($model.FiscalYear.LastMonth)); lookback $($model.Window.First) to $($model.Window.Last)" (Get-ForecastCheckStatus $readiness @('MONTHS', 'COMPARISONS', 'RETAINED'))
+            Write-ForecastSectionLine '3' 'Period' "$($model.FiscalYear.Label) ($($model.FiscalYear.FirstMonth) to $($model.FiscalYear.LastMonth)); lookback $($model.Window.First) to $($model.Window.Last)" (Get-ForecastCheckStatus $readiness @('MONTHS', 'HISTORY', 'ACTUALS', 'COMPARISONS', 'RETAINED'))
             Write-ForecastSectionLine '4' 'Assumptions' "Median growth, P$($settings.method.lowPercentile)-P$($settings.method.highPercentile) range; $(@($settings.scheduledItems).Count) scheduled item(s); workloads by $($settings.workloads.mode)$(if ($settings.workloads.mode -eq 'Tag') { " '$($settings.workloads.tagKey)'" })" (Get-ForecastCheckStatus $readiness @('KEYS', 'BASELINE'))
             $pendingRequired = @($readiness.Reviews | Where-Object { $_.Required -and $_.Decision -eq 'Pending' }).Count
             $pendingOptional = @($readiness.Reviews | Where-Object { -not $_.Required -and $_.Decision -eq 'Pending' }).Count
@@ -121,13 +125,13 @@ function Show-ForecastSetupReview {
             Write-FinOpsConsole ''
             $projection = $model.Projection
             if ($null -ne $model.Growth.Central -and $null -ne $model.Baseline.Value) {
-                Write-FinOpsConsole "  $($projection.FiscalYear.Label) pre-credit: central $(Format-ForecastAmount $projection.TotalCentral $dataset.Currency); range $(Format-ForecastAmount $projection.TotalLow) to $(Format-ForecastAmount $projection.TotalHigh)$(if (-not $readiness.Ready) { ' (preview; not Ready)' })" -ForegroundColor White
+                Write-FinOpsConsole "  $($projection.FiscalYear.Label) pre-credit: central $(Format-ForecastAmount $projection.TotalCentral $dataset.Currency); range $(Format-ForecastAmount $projection.TotalLow) to $(Format-ForecastAmount $projection.TotalHigh)$(if ($readiness.Status -eq 'Preliminary') { ' (preliminary)' } elseif (-not $readiness.Ready) { ' (preview; not Ready)' })" -ForegroundColor White
             }
         }
         Write-FinOpsConsole ''
         $inputsAction = if ($session -and $session.Settings.dataMode -eq 'Manual') { '  I Inputs' } else { '' }
-        Write-FinOpsConsole "  1-7 Open a section$inputsAction   W Workloads   R Refresh   F Forecast and save   P Preview report   Q Quit" -ForegroundColor DarkGray
-        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid @('1', '2', '3', '4', '5', '6', '7', 'I', 'W', 'R', 'F', 'P', 'Q')
+        Write-FinOpsConsole "  1-7 Open a section$inputsAction   W Workloads   R Refresh   F Forecast and save   P Preview report   G Guided setup   Q Quit" -ForegroundColor DarkGray
+        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid @('1', '2', '3', '4', '5', '6', '7', 'I', 'W', 'R', 'F', 'P', 'G', 'Q')
         if ($choice -eq '') { $emptyAnswers++; if ($emptyAnswers -ge 2) { return }; continue }
         $emptyAnswers = 0
         try {
@@ -144,6 +148,7 @@ function Show-ForecastSetupReview {
                 'R' { Invoke-ForecastConsoleRefresh -Root $Root }
                 'F' { if ($session) { Invoke-ForecastConsolePublish -Session $session -OutputPath $OutputPath -SaveVintage } }
                 'P' { if ($session) { Invoke-ForecastConsolePublish -Session $session -OutputPath $OutputPath } }
+                'G' { $null = Start-ForecastGuidedSetup -Root $Root -AsOf $AsOf }
                 'Q' { return }
             }
         }
@@ -303,6 +308,12 @@ function Show-ForecastWorkloads {
 function Invoke-ForecastConsolePublish {
     param([Parameter(Mandatory)]$Session, [string]$OutputPath, [switch]$SaveVintage)
     if ($SaveVintage -and -not $Session.Readiness.Ready) {
+        if ($Session.Readiness.Status -eq 'Preliminary') {
+            Write-ForecastHeading -Title 'A Preliminary forecast isn''t saved'
+            Write-FinOpsConsole "  It uses $($Session.Settings.period.lookbackMonths) months of history; a vintage needs $($script:ForecastReadyMonths). Use P to write a preview report labeled Preliminary." -ForegroundColor Yellow
+            Wait-ForecastKey
+            return
+        }
         Write-ForecastHeading -Title 'The forecast isn''t Ready'
         foreach ($check in @($Session.Readiness.Checks | Where-Object Status -EQ 'Fail')) { Write-FinOpsConsole "  [FAIL] $($check.Name): $(ConvertTo-ForecastSafeText $check.Detail 300)" -ForegroundColor Red }
         Write-FinOpsConsole '  Use P to write a preview report labeled NotReady.' -ForegroundColor DarkGray

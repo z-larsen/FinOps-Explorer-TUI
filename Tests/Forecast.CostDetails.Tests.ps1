@@ -145,6 +145,32 @@ Describe 'Cost Details planning' {
             $first[0].RunId | Should -Not -Be $later[0].RunId
         }
     }
+
+    It 'Starts at the first month the forecast needs when fromMonth is Auto' {
+        InModuleScope FinOpsForecast -Parameters @{ Source = (New-CostDetailsSource -From 'Auto'); Fixed = (New-CostDetailsSource -From '2026-09'); Now = $script:Now } {
+            @((Get-ForecastCostDetailsRuns -Source $Source -Now $Now -EarliestMonth '2026-05').Months) | Should -Be @('2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10', '2026-11')
+            @((Get-ForecastCostDetailsRuns -Source $Source -Now $Now -EarliestMonth '2024-01').Months)[0] | Should -Be '2025-11' -Because 'the API reaches back only 13 months'
+            @((Get-ForecastCostDetailsRuns -Source $Source -Now $Now).Months).Count | Should -Be 13
+            @((Get-ForecastCostDetailsRuns -Source $Fixed -Now $Now -EarliestMonth '2026-01').Months)[0] | Should -Be '2026-09' -Because 'a fixed first month ignores the forecast period'
+        }
+    }
+
+    It 'Needs the lookback window, or the fiscal year''s start when it''s earlier' {
+        InModuleScope FinOpsForecast -Parameters @{ Now = $script:Now } {
+            $settings = New-ForecastDefaultSettings
+            $settings.period.lookbackMonths = 6
+            $settings.period.fiscalYearStartMonth = 7
+            Get-ForecastFirstNeededMonth -Settings $settings -AsOf $Now | Should -Be '2026-05'
+            $settings.period.fiscalYearStartMonth = 1
+            Get-ForecastFirstNeededMonth -Settings $settings -AsOf $Now | Should -Be '2026-01'
+            $settings.period.lookbackMonths = 12
+            Get-ForecastFirstNeededMonth -Settings $settings -AsOf $Now | Should -Be '2025-11'
+            $settings.period.lookbackMonths = 3
+            $settings.period.windowEnd = '2026-06'
+            $settings.period.fiscalYearStartMonth = 7
+            Get-ForecastFirstNeededMonth -Settings $settings -AsOf $Now | Should -Be '2026-04' -Because 'a pinned window end moves the window'
+        }
+    }
 }
 
 Describe 'Cost Details settings' {
@@ -169,11 +195,16 @@ Describe 'Cost Details settings' {
         @{ Case = 'too many days per report'; Source = @{ ChunkDays = 32 } }
         @{ Case = 'non-numeric days'; Source = @{ ChunkDays = 'week' } }
         @{ Case = 'an invalid month'; Source = @{ From = '2026-13' } }
+        @{ Case = 'a last month of Auto'; Source = @{ To = 'Auto' } }
         @{ Case = 'months out of order'; Source = @{ From = '2026-09'; To = '2026-07' } }
         @{ Case = 'the FOCUS schema'; Source = @{ Agreement = 'FOCUS' } }
     ) {
         $parameters = $Source
         InModuleScope FinOpsForecast -Parameters @{ Source = (New-CostDetailsSource @parameters) } { @(Test-ForecastSourceDefinition -Source $Source).Count | Should -BeGreaterThan 0 }
+    }
+
+    It 'Accepts a first month of Auto' {
+        InModuleScope FinOpsForecast -Parameters @{ Source = (New-CostDetailsSource -From 'Auto' -To '2026-09') } { @(Test-ForecastSourceDefinition -Source $Source) | Should -BeNullOrEmpty }
     }
 
     It 'Adds the scope to the ingest profile only for Cost Details sources' {
@@ -377,6 +408,41 @@ Describe 'Cost Details refresh' {
         }
         # 59 weekly chunks for the 12 closed months and 2 for November, then November's 2 again.
         $script:Api.Posts.Count | Should -Be (61 + 2)
+    }
+
+    It 'Reads earlier months when the lookback grows or the fiscal year starts before it, with fromMonth Auto' {
+        $settings = New-CostDetailsSettings -Sources @(New-CostDetailsSource -From 'Auto' -ChunkDays 31)
+        $settings.period.lookbackMonths = 6
+        $settings.period.fiscalYearStartMonth = 7
+        $settings.method.minimumRetained = 3
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; Settings = $settings; Now = $script:Now } {
+            $first = Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Now
+            $first.Error | Should -BeNullOrEmpty
+            $first.RunsRead | Should -Be 7 -Because '2026-05 through November'
+
+            # A January fiscal year has months before the 6-month window, so they're read too.
+            $Settings.period.fiscalYearStartMonth = 1
+            $fiscal = Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Now.AddHours(1)
+            $fiscal.Error | Should -BeNullOrEmpty
+            $fiscal.RunsRead | Should -Be 4 -Because '2026-01 through 2026-04 are new'
+            $fiscal.RunsReused | Should -Be 7
+
+            $Settings.period.lookbackMonths = 12
+            $Settings.method.minimumRetained = 8
+            $longer = Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Now.AddHours(2)
+            $longer.RunsRead | Should -Be 2 -Because '2025-11 and 2025-12 are new'
+            $longer.RunsReused | Should -Be 11
+            $dataset = Get-ForecastDataset -Root $Root -Settings $Settings -Reviews @{}
+            @($dataset.Months | Where-Object Month -EQ '2025-11')[0].Status | Should -Be 'Complete'
+
+            # Lowering the lookback again keeps the final months already read.
+            $Settings.period.lookbackMonths = 6
+            $Settings.period.fiscalYearStartMonth = 7
+            $Settings.method.minimumRetained = 3
+            $shorter = Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Now.AddHours(3)
+            $shorter.RunsRead | Should -Be 0
+            @((Get-ForecastCache -Root $Root).Results | Where-Object { $_.Months -contains '2025-11' }).Count | Should -Be 1
+        }
     }
 
     It 'Keeps a final month the API can no longer reach while the forecast window still needs it' {

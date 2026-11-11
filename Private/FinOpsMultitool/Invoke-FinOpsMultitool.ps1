@@ -690,7 +690,9 @@ function Invoke-FinOpsMultitool {
         }
 
         # -- Tenant picker ------------------------------------------------
-        $tenants = @(Get-AzTenant -ErrorAction SilentlyContinue)
+        # Listing tenants warns for every tenant that needs MFA or consent, even
+        # though only the selected tenant is used; that tenant is verified below.
+        $tenants = @(Get-AzTenant -ErrorAction SilentlyContinue -WarningAction SilentlyContinue)
         if ($tenants.Count -gt 1 -and ($NonInteractive -or -not (Test-FinOpsRichConsole))) {
             # The tenant picker is arrow-key only, so stay in the signed-in tenant
             # until the user explicitly signs in to another one.

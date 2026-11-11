@@ -80,7 +80,8 @@ function ConvertTo-ForecastHtml {
     $currency = $Dataset.Currency
     $projection = $Model.Projection
     $status = $Readiness.Status
-    $labels = if ($Readiness.Labels.Count) { " &middot; " + (ConvertTo-ForecastHtmlText ($Readiness.Labels -join ', ')) } else { '' }
+    $statusLabels = Get-ForecastDisplayLabels -Readiness $Readiness
+    $labels = if ($statusLabels.Count) { " &middot; " + (ConvertTo-ForecastHtmlText ($statusLabels -join ', ')) } else { '' }
     $sb = [Text.StringBuilder]::new()
     [void]$sb.Append(@"
 <!DOCTYPE html>
@@ -92,7 +93,7 @@ function ConvertTo-ForecastHtml {
 body{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#1b1b1b;background:#fafafa}
 h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px}
 .meta{color:#555;font-size:13px}.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-weight:600;font-size:12px}
-.Ready{background:#dff6dd;color:#107c10}.NotReady{background:#fde7e9;color:#a4262c}
+.Ready{background:#dff6dd;color:#107c10}.NotReady{background:#fde7e9;color:#a4262c}.Preliminary{background:#fff4ce;color:#7a4b00}
 .cards{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}.card{background:#fff;border:1px solid #ddd;border-radius:6px;padding:12px 16px;min-width:200px}
 .card .v{font-size:20px;font-weight:600}.card .l{font-size:12px;color:#555}
 table{border-collapse:collapse;width:100%;background:#fff;font-size:12.5px}th,td{border:1px solid #e1e1e1;padding:4px 6px;text-align:left;vertical-align:top}
