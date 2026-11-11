@@ -47,3 +47,6 @@
 !/Private/FinOpsForecast/*.cs
 !/Tests/
 !/Tests/*.ps1
+!/.github/
+!/.github/workflows/
+!/.github/workflows/secret-scan.yml
