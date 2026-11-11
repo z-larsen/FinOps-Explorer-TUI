@@ -133,7 +133,22 @@ function Test-ForecastSourceDefinition {
             if ($container -cnotmatch '^[a-z0-9](?:[a-z0-9-]{1,61})[a-z0-9]\z' -or $container.Contains('--')) { $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Storage source '$label' needs a valid container name.")) }
             if ([string]$Source.prefix -match '(?:^|/)\.{1,2}(?:/|$)|[\\\p{Cc}\p{Cf}]') { $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Storage source '$label' has an unsafe folder prefix.")) }
         }
-        default { $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Source '$label' must be AzureStorage or LocalFolder.")) }
+        'CostDetails' {
+            try { $null = Get-ForecastCostDetailsScope -Scope ([string]$Source.scope) }
+            catch { $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Cost Details source '$label': $($_.Exception.Message)")) }
+            $days = 0
+            if ($null -ne $Source.chunkDays -and [string]$Source.chunkDays -ne '' -and (-not [int]::TryParse([string]$Source.chunkDays, [ref]$days) -or $days -lt 1 -or $days -gt 31)) {
+                $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Cost Details source '$label' needs 1 to 31 days per report."))
+            }
+            foreach ($name in 'fromMonth', 'toMonth') {
+                if ([string]$Source.$name -and -not (Test-ForecastMonthKey -MonthKey ([string]$Source.$name))) { $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Cost Details source '$label' has an invalid $name; use yyyy-MM.")) }
+            }
+            if ((Test-ForecastMonthKey -MonthKey ([string]$Source.fromMonth)) -and (Test-ForecastMonthKey -MonthKey ([string]$Source.toMonth)) -and [string]::CompareOrdinal([string]$Source.fromMonth, [string]$Source.toMonth) -gt 0) {
+                $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Cost Details source '$label' has a first month after its last month."))
+            }
+            if ($Source.agreement -eq 'FOCUS') { $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Cost Details source '$label' returns EA or MCA columns; set its schema to Auto, EA, or MCA.")) }
+        }
+        default { $issues.Add((New-ForecastIssue -Code 'SET-SOURCE' -Message "Source '$label' must be AzureStorage, LocalFolder, or CostDetails.")) }
     }
     return $issues.ToArray()
 }
@@ -158,12 +173,23 @@ function Get-ForecastIngestProfile {
         tagKey       = ([string]$Settings.workloads.tagKey).Trim()
         boundaryDate = [string]$Settings.migration.boundaryDate
         sources      = @($Settings.sources | Sort-Object id | ForEach-Object {
-                [ordered]@{
+                $entry = [ordered]@{
                     id = [string]$_.id; kind = [string]$_.kind; path = [string]$_.path
                     storageResourceId = [string]$_.storageResourceId; container = [string]$_.container
                     prefix = [string]$_.prefix; agreement = [string]$_.agreement
                 }
+                # Only Cost Details sources carry a scope, so existing export workspaces keep their hash.
+                if ([string]$_.kind -eq 'CostDetails') { $entry.scope = ([string]$_.scope).Trim().TrimEnd('/').ToLowerInvariant() }
+                $entry
             })
     }
-    return [pscustomobject]@{ Values = $values; Hash = Get-ForecastHash -Text (($values | ConvertTo-Json -Depth 5 -Compress)) -Length 16 }
+    # Cost Details months beyond the API's reach can't be read again, so their
+    # records are tied only to what changes their content: their own source,
+    # the tag key, and the boundary. Adding or editing another source keeps them.
+    $sourceHashes = @{}
+    foreach ($entry in $values.sources) {
+        $scoped = [ordered]@{ version = $values.version; tagKey = $values.tagKey; boundaryDate = $values.boundaryDate; source = $entry }
+        $sourceHashes[[string]$entry.id] = Get-ForecastHash -Text ($scoped | ConvertTo-Json -Depth 5 -Compress) -Length 16
+    }
+    return [pscustomobject]@{ Values = $values; Hash = Get-ForecastHash -Text (($values | ConvertTo-Json -Depth 5 -Compress)) -Length 16; SourceHashes = $sourceHashes }
 }

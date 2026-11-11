@@ -4,7 +4,7 @@ FinOps Explorer can forecast a fiscal year of Azure spend from your own Cost Man
 
 All amounts are **pre-credit**: what Cost Management reports before Azure credits and Azure Prepayment are applied. That's `CostInBillingCurrency` (EA), `costInBillingCurrency` (MCA), or `BilledCost` (FOCUS). Negotiated discounts are included and list prices aren't used. Marketplace and tax are excluded by default.
 
-The forecast only reads Azure data. It never creates exports, changes permissions, or provisions anything.
+The forecast only reads Azure data. It never creates exports, changes permissions, or provisions anything. The one request it sends is with a Cost Details source, which asks Cost Management to generate a temporary report.
 
 For the design, method details, and test coverage, see [forecast-design.md](forecast-design.md).
 
@@ -15,7 +15,7 @@ For the design, method details, and test coverage, see [forecast-design.md](fore
 - At least **12 complete months** of history. The portal can backfill up to 13 months one month at a time; the [Exports Execute REST API](https://learn.microsoft.com/azure/cost-management-billing/costs/tutorial-improved-exports) goes back further. Set those up yourself; the forecast won't create them.
 - **Storage Blob Data Reader** on the storage account the exports deliver to. A local copy of the export container (same folder layout, for example from AzCopy) works too, with no Azure access at all.
 
-No exports? Switch the workspace to **manual inputs** and type in monthly totals from invoices instead.
+No exports? If you have Cost Management read access at a subscription or billing scope, add a [Cost Details source](#read-cost-management-directly-cost-details) and the forecast requests the reports itself. Otherwise, switch the workspace to **manual inputs** and type in monthly totals from invoices.
 
 ## Start it
 
@@ -36,7 +36,7 @@ Everything happens on one page. Each line shows a status: **OK**, **CHECK** (a w
 
 | Section | What you set or check |
 |---|---|
-| 1 Source | Export locations (discover in Azure, enter a storage path, or a local folder), the EA-to-MCA migration date, or a switch to manual inputs |
+| 1 Source | Export locations (discover in Azure, enter a storage path, or a local folder), live Cost Details reports, the EA-to-MCA migration date, or a switch to manual inputs |
 | 2 Scope | Selected subscriptions, or an MCA billing profile (its EA history before the migration is included for the same subscriptions) |
 | 3 Period | Fiscal-year start month, current or next fiscal year, lookback length, finalization grace days, stale-data age |
 | 4 Assumptions | Growth method settings, Marketplace and tax filters, workload mode and mapping, scheduled purchases, renewals, and business changes |
@@ -48,12 +48,34 @@ Other keys: **R** refresh, **W** workloads, **F** forecast and save, **P** previ
 
 A typical first run:
 
-1. **1 Source**: press **D** to discover exports, or **A**/**L** to add a location. If the history spans an EA-to-MCA move, press **T** and enter the transition date.
+1. **1 Source**: press **D** to discover exports, **A**/**L** to add a location, or **C** to add a Cost Details scope. If the history spans an EA-to-MCA move, press **T** and enter the transition date.
 2. **2 Scope**: pick subscriptions or enter the billing profile ID.
 3. **3 Period**: set the fiscal-year start month.
 4. **R** to read the exports. Later refreshes only read runs that are new or changed.
 5. **5 Exceptions**: work through anything marked REQUIRED.
 6. **F** to save the forecast. It's only saved when the status is **READY**.
+
+## Read Cost Management directly (Cost Details)
+
+When nobody has set up exports, or you can't reach the files, a **Cost Details** source asks Cost Management for ActualCost reports through the [Cost Details API](https://learn.microsoft.com/azure/cost-management-billing/automate/get-small-usage-datasets-on-demand). The reports have the same EA or MCA columns as an actual-cost export, so everything after the read (checks, reviews, reconciliation, the forecast) works the same way.
+
+**Access.** You need Cost Management read access at the scope, such as Cost Management Reader at a subscription, or an EA or MCA billing reader role at a billing scope. On EA, the enrollment's charges-visibility setting must be on. Azure Reader on its own may not show costs. A quick test: if Cost analysis shows actual costs at that scope in the portal, the source should work.
+
+**Scopes.** A subscription (`/subscriptions/<id>`), an EA enrollment, department, or enrollment account, or an MCA billing account, billing profile, invoice section, or customer (`/providers/Microsoft.Billing/billingAccounts/<id>/...`). Management groups and resource groups aren't supported by the API. Only EA and MCA agreements work; pay-as-you-go and Visual Studio subscriptions don't.
+
+**How far back.** The API reaches 13 months, so the source requests every whole month it can still reach, plus the current month through yesterday. That's 12 complete months, which is what the forecast needs. In the first few days of a month, until last month passes the grace period, the forecast window still starts one month further back than the API can reach. Months an earlier refresh already read are kept for that reason, so refresh at least once a month. A workspace whose very first refresh lands in those days is a month short until the grace period passes. Use **First month** and **Last month** to narrow the range. Older history needs exports.
+
+**After an EA-to-MCA move**, EA history stays in the EA enrollment and MCA history starts in the billing profile. Add one source for each, set **T** to the transition date, and give the EA source a last month and the MCA source a first month around it. See [the sample config](../samples/forecast/forecast-config.costdetails.sample.json). Each side needs its own access: a subscription that moved to MCA usually shows only its MCA costs at subscription scope.
+
+**Large scopes.** Each report covers a week by default. Microsoft recommends day or week chunks, and Exports, above roughly 2 GB or 2 million rows a month. For a month that size, a first refresh means about 65 report requests and several gigabytes of downloads, and can take an hour. Set **Days per report** to 1 if a single week's report is too large to hold in memory.
+
+**What's cached.** A month read at least the grace period after it closed is kept and never requested again. The current month and newly closed months are requested again on later refreshes, but not more than once every four hours, since Cost Management only refreshes these reports about that often. If a chunk fails, its month stays out until the next refresh reads it. If a refresh stops partway, months it already read completely are kept, so the next refresh carries on.
+
+**Settle the boundary and tag key first.** Cached months depend on the migration boundary, the workload tag key, and the source's own scope and schema. Adding or changing other sources doesn't affect them. Changing those four means every month is read again, but months already beyond the API's reach can't be. The refresh warns and lists any months it had to drop, so set them before the first Cost Details refresh.
+
+**Charge dates.** Learn describes this data as tied to when the billing system received a cost, so a month's report can include a charge dated in the month before. Those rows aren't counted twice or moved; they show as CHECK on the Source line and as `ExcludedOutsideRange` in reconciliation, like any export row outside its run's dates.
+
+**What it sends.** One POST per chunk, to `generateCostDetailsReport` at your scope; it creates a temporary report, not an Azure resource. Then it polls the status link Cost Management returns, after checking it's on your cloud's Resource Manager endpoint and for the same scope. Report files come back as short-lived download links. They're fetched over HTTPS from your cloud's blob storage, without your Azure token or redirects. The links are never written to the console, the workspace, or reports.
 
 ## Review decisions
 
@@ -142,7 +164,8 @@ It refreshes, writes reports, and saves a vintage if the forecast is Ready. If i
 - If an already cached run becomes unreadable or invalid, refresh fails and keeps the last good cache, labeled Stale data.
 - For local copies, updated files must have updated modification times. An in-place change preserving both size and modification time can't be detected from the listing. Changing source settings or ingestion rules requires a refresh.
 - Reconciliation ignores differences under 0.000001, which come from decimal rounding of very long amounts.
-- A first refresh reads about 10 MB of uncompressed CSV a second, roughly 10,000 real cost rows. Thirteen months at a million rows a month takes about 20 to 25 minutes the first time; later refreshes only read new runs.
+- A first refresh reads about 10 MB of uncompressed CSV a second, roughly 10,000 real cost rows. Thirteen months at a million rows a month takes about 20 to 25 minutes the first time; later refreshes only read new runs. Cost Details sources also wait for each report to be generated.
+- Cost Details sources haven't been run against a live tenant yet. The tests use a synthetic API that follows the documented contract; the first real run should start with a narrow month range.
 - Windows is the verified platform. The code is cross-platform, but Linux and macOS haven't been tested.
 
 ## Tests

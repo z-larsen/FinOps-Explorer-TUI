@@ -54,7 +54,7 @@ function Initialize-ForecastAggregator {
 }
 
 function Open-ForecastCsvParser {
-    param([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][string]$Name)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes, [Parameter(Mandatory)][string]$Name)
     [void][Reflection.Assembly]::Load('Microsoft.VisualBasic.Core')
     $stream = [IO.MemoryStream]::new($Bytes, $false)
     if ($Name -match '\.gz$') { $stream = [IO.Compression.GZipStream]::new($stream, [IO.Compression.CompressionMode]::Decompress) }

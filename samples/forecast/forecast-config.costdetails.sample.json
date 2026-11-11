@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "dataMode": "Exports",
+  "scope": {
+    "kind": "Subscriptions",
+    "subscriptionIds": [
+      "00000000-0000-0000-0000-000000000001",
+      "00000000-0000-0000-0000-000000000002"
+    ],
+    "billingProfileId": "",
+    "label": "Contoso production (synthetic)"
+  },
+  "period": {
+    "fiscalYearStartMonth": 7,
+    "fiscalYearOffset": 0,
+    "lookbackMonths": 12,
+    "graceDays": 3,
+    "staleAfterDays": 35,
+    "windowEnd": "Auto"
+  },
+  "filters": {
+    "includeMarketplace": false,
+    "includeTax": false
+  },
+  "method": {
+    "central": "Median",
+    "lowPercentile": 25,
+    "highPercentile": 75,
+    "anomalyK": "3",
+    "anomalyMinimumDeviation": "0.05",
+    "minimumRetained": 8,
+    "backtestHorizon": 6
+  },
+  "workloads": {
+    "mode": "Tag",
+    "tagKey": "workload",
+    "mappingPath": ""
+  },
+  "sources": [
+    {
+      "id": "ea-live",
+      "kind": "CostDetails",
+      "label": "EA enrollment, live (before migration)",
+      "scope": "/providers/Microsoft.Billing/billingAccounts/1234567",
+      "chunkDays": 7,
+      "fromMonth": "",
+      "toMonth": "2026-06",
+      "storageResourceId": "",
+      "container": "",
+      "prefix": "",
+      "path": "",
+      "agreement": "EA"
+    },
+    {
+      "id": "mca-live",
+      "kind": "CostDetails",
+      "label": "MCA billing profile, live (after migration)",
+      "scope": "/providers/Microsoft.Billing/billingAccounts/00000000-0000-0000-0000-000000000000:00000000-0000-0000-0000-000000000000_2019-05-31/billingProfiles/AAAA-BBBB-CCC-DDD",
+      "chunkDays": 7,
+      "fromMonth": "2026-07",
+      "toMonth": "",
+      "storageResourceId": "",
+      "container": "",
+      "prefix": "",
+      "path": "",
+      "agreement": "MCA"
+    }
+  ],
+  "migration": {
+    "boundaryDate": "2026-07-01"
+  },
+  "scheduledItems": []
+}

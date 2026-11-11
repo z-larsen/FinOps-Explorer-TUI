@@ -226,13 +226,16 @@ function Invoke-ForecastConsoleRefresh {
     param([Parameter(Mandatory)][string]$Root)
     $settings = Get-ForecastStoredSettings -Root $Root
     if ($settings.dataMode -ne 'Exports') { Write-FinOpsConsole '  Manual inputs don''t need a refresh.' -ForegroundColor DarkGray; Wait-ForecastKey; return }
-    if (@($settings.sources | Where-Object kind -EQ 'AzureStorage').Count -and -not (Get-AzContext -ErrorAction SilentlyContinue)) {
-        Write-FinOpsConsole '  Signing in to read Azure Storage sources...' -ForegroundColor Yellow
+    if (@($settings.sources | Where-Object kind -In 'AzureStorage', 'CostDetails').Count -and -not (Get-AzContext -ErrorAction SilentlyContinue)) {
+        Write-FinOpsConsole '  Signing in to read Azure sources...' -ForegroundColor Yellow
         $null = Select-Subscription
     }
     Write-FinOpsConsole '  Refreshing export history...' -ForegroundColor Cyan
     $result = Update-ForecastExportCache -Root $Root -Settings $settings
-    if ($result.Succeeded) { Write-FinOpsConsole "  Refresh succeeded: $($result.RunsRead) run(s) read, $($result.RunsReused) reused from the cache." -ForegroundColor Green }
+    if ($result.Succeeded) {
+        Write-FinOpsConsole "  Refresh succeeded: $($result.RunsRead) run(s) read, $($result.RunsReused) reused from the cache." -ForegroundColor Green
+        if ($result.RunsIncomplete) { Write-FinOpsConsole "  $($result.RunsIncomplete) run(s) couldn't be read completely and aren't used. Data checks list the reasons; refresh again to retry them." -ForegroundColor Yellow }
+    }
     else { Write-FinOpsConsole "  Refresh failed; the previous data is still in use. $($result.Error)" -ForegroundColor Red }
     Wait-ForecastKey
 }

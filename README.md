@@ -400,7 +400,9 @@ central estimate with a sensitivity range, and which workloads drove the
 growth. Amounts are pre-credit (cost before Azure credits and prepayment), with
 Marketplace and tax excluded by default. It reads EA, MCA, and FOCUS
 actual-cost exports, joins EA and MCA history across a migration, and falls
-back to manual monthly inputs when no exports exist.
+back to manual monthly inputs when no exports exist. Without exports, it can
+also request ActualCost reports straight from Cost Management (the Cost
+Details API) at a subscription or billing scope, up to 13 months back.
 
 ```powershell
 . .\Public\Start-FinOpsForecast.ps1
@@ -411,9 +413,11 @@ You can also choose **Pre-credit forecast and workload growth** at the first
 prompt of `Start-FinOpsExplorer`. Scripted Explorer runs (`-NonInteractive`,
 `-Scans`, or `-DataSource`) skip that prompt.
 
-The forecast reads Azure data only. It needs 12 or more complete months, asks
-for a decision whenever the data is ambiguous, and won't save a forecast until
-every required check passes. See the [usage guide](docs/forecast.md) and the
+The forecast reads Azure data only; the one request it sends asks Cost
+Management to generate a temporary report, and it never creates exports,
+changes permissions, or provisions anything. It needs 12 or more complete
+months, asks for a decision whenever the data is ambiguous, and won't save a
+forecast until every required check passes. See the [usage guide](docs/forecast.md) and the
 [design and integration plan](docs/forecast-design.md).
 
 ## Reports and privacy
@@ -472,9 +476,10 @@ The forecast has its own Pester 6 suite in `Tests/`, using synthetic data only:
 .\scripts\Invoke-ForecastTests.ps1 -ToolkitRoot '<path-to-finops-toolkit-repository>'
 ```
 
-It covers export selection and verification, EA-to-MCA joins, the forecast
-method, workloads, manual inputs, the workspace store, the console screens,
-end-to-end runs, and read-only safety. It doesn't test live Azure access.
+It covers export selection and verification, EA-to-MCA joins, the Cost Details
+source against a synthetic Cost Management API, the forecast method, workloads,
+manual inputs, the workspace store, the console screens, end-to-end runs, and
+read-only safety. It doesn't test live Azure access.
 
 For the original public packaging, all 79 PowerShell files passed syntax parsing,
 the KPI catalog parsed as JSON, and the root module and public entry point loaded
