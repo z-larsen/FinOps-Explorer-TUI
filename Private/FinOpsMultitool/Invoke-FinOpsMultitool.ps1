@@ -652,6 +652,187 @@ function Invoke-FinOpsMultitool {
     }
 
     # =====================================================================
+    #  TENANT PICKER
+    # =====================================================================
+    # Tenants are listed by name, never by ID. A tenant without a name shows
+    # its default domain, tenants that share a name add their domain, and any
+    # lines that would still read the same are numbered. Names come from other
+    # organizations' directories, so control characters are removed.
+    function Get-FinOpsTenantChoice {
+        param([object[]]$Tenants, [string]$CurrentTenantId)
+        $entries = [System.Collections.Generic.List[object]]::new()
+        $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($tenant in @($Tenants | Where-Object { $_ })) {
+            $id = if ($tenant.TenantId) { [string]$tenant.TenantId } else { [string]$tenant.Id }
+            if ([string]::IsNullOrWhiteSpace($id) -or -not $seen.Add($id)) { continue }
+            $name = ([string]$tenant.Name -replace '[\p{Cc}\p{Cf}]', '').Trim()
+            if ($name -eq $id) { $name = '' }
+            $domain = [string]$tenant.DefaultDomain
+            if ([string]::IsNullOrWhiteSpace($domain)) { $domain = [string]@($tenant.Domains | Where-Object { $_ })[0] }
+            $domain = ($domain -replace '[\p{Cc}\p{Cf}]', '').Trim()
+            $entries.Add([pscustomobject]@{
+                    TenantId = $id
+                    Name     = $name
+                    Domain   = $domain
+                    Label    = ''
+                    Current  = [string]::Equals($id, $CurrentTenantId, [System.StringComparison]::OrdinalIgnoreCase)
+                })
+        }
+        $nameCounts = @{}
+        foreach ($entry in $entries) { if ($entry.Name) { $nameCounts[$entry.Name] = 1 + [int]$nameCounts[$entry.Name] } }
+        foreach ($entry in $entries) {
+            $entry.Label = if ($entry.Name -and $nameCounts[$entry.Name] -gt 1 -and $entry.Domain) { "$($entry.Name) ($($entry.Domain))" }
+            elseif ($entry.Name) { $entry.Name }
+            elseif ($entry.Domain) { $entry.Domain }
+            else { 'Unnamed tenant' }
+        }
+        foreach ($group in @($entries | Group-Object -Property Label | Where-Object Count -GT 1)) {
+            $number = 0
+            foreach ($entry in @($group.Group | Sort-Object -Property TenantId)) { $number++; $entry.Label = "$($entry.Label) ($number)" }
+        }
+        $entries | Sort-Object -Property Label, TenantId
+    }
+
+    # Applies one key press to the tenant picker and returns 'Select', 'Stay',
+    # or $null to keep going. Typing narrows the list to names that contain the
+    # text; Esc clears the text, then stays in the current tenant. Kept apart
+    # from drawing so it can be tested without a console.
+    function Step-FinOpsTenantPicker {
+        param([Parameter(Mandatory)][hashtable]$State, [Parameter(Mandatory)]$Key, [int]$PageSize = 15)
+        $code = [int]$Key.VirtualKeyCode
+        $character = [char]$Key.Character
+        $filterChanged = $false
+        if ($code -eq 13) {
+            if (@($State.Visible).Count) { return 'Select' }
+        }
+        elseif ($code -eq 27) {
+            if (-not $State.Filter) { return 'Stay' }
+            $State.Filter = ''
+            $filterChanged = $true
+        }
+        elseif ($code -eq 8) {
+            if ($State.Filter) { $State.Filter = $State.Filter.Substring(0, $State.Filter.Length - 1); $filterChanged = $true }
+        }
+        elseif ($code -eq 38) { $State.Cursor-- }
+        elseif ($code -eq 40) { $State.Cursor++ }
+        elseif ($code -eq 33) { $State.Cursor -= $PageSize }
+        elseif ($code -eq 34) { $State.Cursor += $PageSize }
+        elseif ($code -eq 36) { $State.Cursor = 0 }
+        elseif ($code -eq 35) { $State.Cursor = @($State.Visible).Count - 1 }
+        elseif ($character -ne [char]0 -and -not [char]::IsControl($character) -and $State.Filter.Length -lt 60) {
+            $State.Filter += $character
+            $filterChanged = $true
+        }
+        if ($filterChanged) {
+            $text = $State.Filter
+            $State.Visible = @($State.Choices | Where-Object { -not $text -or $_.Label.IndexOf($text, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 })
+            $State.Cursor = 0
+            $State.Offset = 0
+            if (-not $text) {
+                for ($i = 0; $i -lt $State.Visible.Count; $i++) { if ($State.Visible[$i].Current) { $State.Cursor = $i; break } }
+            }
+        }
+        $State.Cursor = [math]::Max(0, [math]::Min($State.Cursor, @($State.Visible).Count - 1))
+        if ($State.Cursor -lt $State.Offset) { $State.Offset = $State.Cursor }
+        if ($State.Cursor -ge $State.Offset + $PageSize) { $State.Offset = $State.Cursor - $PageSize + 1 }
+        return $null
+    }
+
+    # Lets the user choose a tenant by name. Returns the chosen entry from
+    # Get-FinOpsTenantChoice, or $null to stay in the current tenant. Tests
+    # pass ReadKey to drive the arrow-key list.
+    function Select-FinOpsTenant {
+        param([Parameter(Mandatory)][object[]]$Choices, [scriptblock]$ReadKey = { $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') })
+        $current = @($Choices | Where-Object Current)[0]
+        $currentLabel = if ($current) { $current.Label } else { 'the current tenant' }
+        Write-FinOpsConsole "  $($Choices.Count) tenants available:" -ForegroundColor White
+        Write-FinOpsConsole ""
+
+        if (-not (Test-FinOpsRichConsole)) {
+            # Numbered list: a number, or part of a name that matches one tenant.
+            $listed = $Choices
+            for ($attempt = 0; $attempt -lt 3; $attempt++) {
+                for ($i = 0; $i -lt $listed.Count; $i++) {
+                    Write-FinOpsConsole ("    [{0}] {1}{2}" -f ($i + 1), $listed[$i].Label, $(if ($listed[$i].Current) { ' (current)' } else { '' }))
+                }
+                Write-FinOpsConsole ""
+                $answer = Read-FinOpsAnswer "  Tenant number or part of its name (Enter = stay in $currentLabel): "
+                if ($answer -eq '') { return $null }
+                $number = 0
+                if ([int]::TryParse($answer, [ref]$number)) {
+                    if ($number -ge 1 -and $number -le $listed.Count) { return $listed[$number - 1] }
+                    Write-FinOpsConsole "  '$answer' isn't one of the listed numbers." -ForegroundColor Yellow
+                    continue
+                }
+                $found = @($Choices | Where-Object { $_.Label.IndexOf($answer, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 })
+                if ($found.Count -eq 1) { return $found[0] }
+                if ($found.Count -eq 0) {
+                    Write-FinOpsConsole "  No tenant name contains '$answer'." -ForegroundColor Yellow
+                    continue
+                }
+                Write-FinOpsConsole "  $($found.Count) tenants match '$answer':" -ForegroundColor White
+                $listed = $found
+            }
+            return $null
+        }
+
+        # Arrow-key list that scrolls and narrows as you type.
+        $pageSize = 15
+        try { $pageSize = [math]::Max(5, [math]::Min(15, [Console]::WindowHeight - 8)) } catch { $pageSize = 15 }
+        $rows = [math]::Min($pageSize, $Choices.Count)
+        $state = @{ Choices = $Choices; Visible = $Choices; Filter = ''; Cursor = 0; Offset = 0 }
+        for ($i = 0; $i -lt $Choices.Count; $i++) { if ($Choices[$i].Current) { $state.Cursor = $i; break } }
+        $null = Step-FinOpsTenantPicker -State $state -Key ([pscustomobject]@{ VirtualKeyCode = 0; Character = [char]0 }) -PageSize $pageSize
+        while ($true) {
+            $width = Get-MenuWidth 85
+            $fit = { param([string]$Text) if ($Text.Length -gt $width) { $Text = $Text.Substring(0, $width - 3) + '...' }; $Text.PadRight($width) }
+            $visible = @($state.Visible)
+            Move-FinOpsCursorLine
+            $status = if ($state.Filter) { "  Filter: $($state.Filter)  ($($visible.Count) of $($Choices.Count))" } else { '  Type part of a name to narrow the list.' }
+            Write-FinOpsConsole (& $fit $status) -ForegroundColor DarkGray
+            for ($row = 0; $row -lt $rows; $row++) {
+                $index = $state.Offset + $row
+                if ($index -ge $visible.Count) { Write-FinOpsConsole (& $fit ''); continue }
+                $isCursor = $index -eq $state.Cursor
+                $line = "$(if ($isCursor) { '  > ' } else { '    ' })$($visible[$index].Label)$(if ($visible[$index].Current) { ' (current)' })"
+                Write-FinOpsConsole (& $fit $line) -ForegroundColor $(if ($isCursor) { 'Green' } else { 'Gray' })
+            }
+            Write-FinOpsConsole ""
+            Write-FinOpsConsole (& $fit '  ↑↓ Navigate  │  Type to filter  │  Enter = Select  │  Esc = Stay in current') -ForegroundColor DarkGray
+            $key = & $ReadKey
+            $action = Step-FinOpsTenantPicker -State $state -Key $key -PageSize $pageSize
+            if ($action -eq 'Select') { Write-FinOpsConsole ""; return @($state.Visible)[$state.Cursor] }
+            if ($action -eq 'Stay') { Write-FinOpsConsole ""; return $null }
+            Move-FinOpsCursorLine -LinesUp ($rows + 3)
+        }
+    }
+
+    # Explorer chooses the tenant and subscriptions itself, so Az's own
+    # subscription list, which spans every tenant, is turned off for this
+    # PowerShell session while signing in, then restored. Saved Az settings
+    # aren't changed.
+    function Connect-FinOpsAzAccount {
+        param([string]$TenantId)
+        $parameters = @{ ErrorAction = 'Stop' }
+        if ($TenantId) { $parameters.TenantId = $TenantId }
+        $restore = $null
+        if (Get-Command Update-AzConfig -ParameterName LoginExperienceV2 -ErrorAction SilentlyContinue) {
+            $setting = Get-AzConfig -LoginExperienceV2 -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ([string]$setting.Value -ne 'Off') {
+                $restore = if ([string]$setting.Scope -eq 'Process') { [string]$setting.Value } else { '' }
+                $null = Update-AzConfig -LoginExperienceV2 Off -Scope Process -ErrorAction SilentlyContinue
+            }
+        }
+        try { $null = Connect-AzAccount @parameters }
+        finally {
+            if ($null -ne $restore) {
+                if ($restore) { $null = Update-AzConfig -LoginExperienceV2 $restore -Scope Process -ErrorAction SilentlyContinue }
+                else { $null = Clear-AzConfig -LoginExperienceV2 -Scope Process -Confirm:$false -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+
+    # =====================================================================
     #  SUBSCRIPTION PICKER
     # =====================================================================
     function Select-Subscription {
@@ -662,7 +843,11 @@ function Invoke-FinOpsMultitool {
         if (-not $ctx) {
             if ($NonInteractive) { throw 'NonInteractive requires an existing Azure context. Run Connect-AzAccount with the intended identity before starting the scan.' }
             Write-FinOpsConsole "  Not connected. Launching browser login..." -ForegroundColor Yellow
-            Connect-AzAccount | Out-Null
+            try { Connect-FinOpsAzAccount }
+            catch {
+                Write-FinOpsConsole "  Sign-in didn't finish: $(@($_.Exception.Message -split '\r?\n')[0])" -ForegroundColor Yellow
+                return $null
+            }
             $ctx = Get-AzContext
         }
         if ([string]::IsNullOrWhiteSpace($ctx.Tenant.Id)) {
@@ -684,7 +869,9 @@ function Invoke-FinOpsMultitool {
             }
             $null = Set-AzContext -SubscriptionId $sub.Id -TenantId $ctx.Tenant.Id -Scope Process -ErrorAction Stop -WarningAction SilentlyContinue
             Write-FinOpsConsole "  Using subscription: $($sub.Name)" -ForegroundColor Green
-            Write-FinOpsConsole "  Tenant: $($sub.TenantId)" -ForegroundColor Green
+            # The tenant is shown by name only, when the context has one.
+            $tenantName = ([string]$ctx.Tenant.Name -replace '[\p{Cc}\p{Cf}]', '').Trim()
+            if ($tenantName -and $tenantName -ne $ctx.Tenant.Id) { Write-FinOpsConsole "  Tenant: $tenantName" -ForegroundColor Green }
             Write-FinOpsConsole ""
             return @($sub)
         }
@@ -693,79 +880,45 @@ function Invoke-FinOpsMultitool {
         # Listing tenants warns for every tenant that needs MFA or consent, even
         # though only the selected tenant is used; that tenant is verified below.
         $tenants = @(Get-AzTenant -ErrorAction SilentlyContinue -WarningAction SilentlyContinue)
-        if ($tenants.Count -gt 1 -and ($NonInteractive -or -not (Test-FinOpsRichConsole))) {
-            # The tenant picker is arrow-key only, so stay in the signed-in tenant
-            # until the user explicitly signs in to another one.
-            $currentTenant = (Get-AzContext -ErrorAction SilentlyContinue).Tenant.Id
-            Write-FinOpsConsole "  Tenant: $currentTenant" -ForegroundColor Green
-            Write-FinOpsConsole "  $($tenants.Count) tenants available. Sign in to the intended tenant before targeting another one." -ForegroundColor DarkGray
+        $choices = @(Get-FinOpsTenantChoice -Tenants $tenants -CurrentTenantId $ctx.Tenant.Id)
+        $currentChoice = @($choices | Where-Object Current)[0]
+        $tenantLabel = if ($currentChoice) { $currentChoice.Label } else { 'the signed-in tenant' }
+        if ($choices.Count -gt 1 -and $NonInteractive) {
+            # Unattended runs never switch tenants.
+            Write-FinOpsConsole "  Tenant: $tenantLabel" -ForegroundColor Green
+            Write-FinOpsConsole "  $($choices.Count) tenants available. Sign in to the intended tenant before targeting another one." -ForegroundColor DarkGray
             Write-FinOpsConsole ""
         }
-        elseif ($tenants.Count -gt 1) {
-            Write-FinOpsConsole "  $($tenants.Count) tenants available:" -ForegroundColor White
-            Write-FinOpsConsole ""
-
-            $tCursor = 0
-            $currentTenantId = $ctx.Tenant.Id
-            # Pre-select current tenant
-            for ($t = 0; $t -lt $tenants.Count; $t++) {
-                if ($tenants[$t].TenantId -eq $currentTenantId) { $tCursor = $t; break }
-            }
-
-            while ($true) {
-                $tWidth = Get-MenuWidth 85
-                Move-FinOpsCursorLine
-                for ($t = 0; $t -lt $tenants.Count; $t++) {
-                    $tPrefix = if ($t -eq $tCursor) { '  > ' } else { '    ' }
-                    $tColor = if ($t -eq $tCursor) { 'Green' } else { 'Gray' }
-                    $tLabel = if ($tenants[$t].Name -and $tenants[$t].Name -ne $tenants[$t].TenantId) {
-                        "$($tenants[$t].Name)  ($($tenants[$t].TenantId))"
-                    }
-                    else { $tenants[$t].TenantId }
-                    $current = if ($tenants[$t].TenantId -eq $currentTenantId) { ' (current)' } else { '' }
-                    $tLine = "$tPrefix$tLabel$current"
-                    if ($tLine.Length -gt $tWidth) { $tLine = $tLine.Substring(0, $tWidth - 3) + '...' }
-                    Write-FinOpsConsole $tLine.PadRight($tWidth) -ForegroundColor $tColor
+        elseif ($choices.Count -gt 1) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                $selected = Select-FinOpsTenant -Choices $choices
+                if (-not $selected -or $selected.Current) {
+                    Write-FinOpsConsole "  Staying in $tenantLabel." -ForegroundColor Green
+                    break
                 }
-                Write-FinOpsConsole ""
-                Write-FinOpsConsole "  ↑↓ Navigate  │  Enter = Select tenant  │  Q = Stay in current" -ForegroundColor DarkGray
-
-                $tKey = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-                switch ($tKey.VirtualKeyCode) {
-                    38 { if ($tCursor -gt 0) { $tCursor-- } }
-                    40 { if ($tCursor -lt $tenants.Count - 1) { $tCursor++ } }
-                    13 {
-                        $selectedTenant = $tenants[$tCursor]
-                        if ($selectedTenant.TenantId -ne $currentTenantId) {
-                            Write-FinOpsConsole ""
-                            Write-FinOpsConsole "  Switching to tenant: $($selectedTenant.Name)..." -ForegroundColor Yellow
-                            Connect-AzAccount -TenantId $selectedTenant.TenantId | Out-Null
-                            $ctx = Get-AzContext
-                            Write-FinOpsConsole "  Connected to: $($ctx.Tenant.Id)" -ForegroundColor Green
-                        }
-                        else {
-                            Write-FinOpsConsole ""
-                            Write-FinOpsConsole "  Staying in current tenant." -ForegroundColor Green
-                        }
-                        break
-                    }
-                    81 {
-                        Write-FinOpsConsole ""
-                        Write-FinOpsConsole "  Staying in current tenant." -ForegroundColor Green
-                        break
-                    }
+                Write-FinOpsConsole "  Signing in to $($selected.Label)..." -ForegroundColor Yellow
+                try { Connect-FinOpsAzAccount -TenantId $selected.TenantId }
+                catch {
+                    Write-FinOpsConsole "  Sign-in to $($selected.Label) didn't finish: $(@($_.Exception.Message -split '\r?\n')[0])" -ForegroundColor Yellow
+                    if ($attempt -eq 3) { return $null }
+                    Write-FinOpsConsole ""
+                    continue
                 }
-                if ($tKey.VirtualKeyCode -eq 13 -or $tKey.VirtualKeyCode -eq 81) { break }
-
-                # Move cursor back up to re-render
-                $tLinesToClear = $tenants.Count + 2
-                Move-FinOpsCursorLine -LinesUp $tLinesToClear
+                # Only the chosen tenant's subscriptions are listed, so the
+                # sign-in has to have ended there.
+                $ctx = Get-AzContext -ErrorAction SilentlyContinue
+                if (-not $ctx -or $ctx.Tenant.Id -ne $selected.TenantId) {
+                    Write-FinOpsConsole "  The sign-in didn't end in $($selected.Label), so no subscriptions were listed." -ForegroundColor Yellow
+                    return $null
+                }
+                $tenantLabel = $selected.Label
+                Write-FinOpsConsole "  Connected to: $tenantLabel" -ForegroundColor Green
+                break
             }
             Write-FinOpsConsole ""
         }
-        elseif ($tenants.Count -eq 1) {
-            $tLabel = if ($tenants[0].Name -and $tenants[0].Name -ne $tenants[0].TenantId) { $tenants[0].Name } else { $tenants[0].TenantId }
-            Write-FinOpsConsole "  Tenant: $tLabel" -ForegroundColor Green
+        elseif ($currentChoice) {
+            Write-FinOpsConsole "  Tenant: $tenantLabel" -ForegroundColor Green
             Write-FinOpsConsole ""
         }
 
@@ -779,7 +932,7 @@ function Invoke-FinOpsMultitool {
         }
         $allSubs = @(Get-AzSubscription -TenantId $effectiveTenantId -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Enabled' })
         if ($allSubs.Count -eq 0) {
-            Write-Error "No enabled subscriptions found in tenant $effectiveTenantId."
+            Write-Error "No enabled subscriptions found in $tenantLabel."
             return $null
         }
         if ($allSubs.Count -eq 1) {

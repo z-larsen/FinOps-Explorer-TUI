@@ -30,7 +30,7 @@ Explorer runs started with `-NonInteractive`, `-Scans`, or `-DataSource` skip th
 
 ### Guided setup
 
-Without a workspace name, the forecast signs you in first, using the same tenant and subscription picker as Explorer's scans. It then opens a workspace named after the signed-in tenant, such as `contoso-1a2b3c4d`, so one customer's saved forecasts and review decisions never mix with another's. You can accept the name or type another.
+Without a workspace name, the forecast signs you in first, using the same tenant and subscription picker as Explorer's scans: you choose a tenant by name, then its subscriptions. It then opens a workspace named after the tenant's domain, such as `contoso` for contoso.onmicrosoft.com, so one customer's saved forecasts and review decisions never mix with another's. You can accept the name or type another.
 
 A new workspace goes straight into a few questions:
 

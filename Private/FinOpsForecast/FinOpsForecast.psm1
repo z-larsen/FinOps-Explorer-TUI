@@ -24,7 +24,8 @@ Import-Module (Join-Path $multitoolRoot 'FinOpsMultitool.psm1') -ErrorAction Sto
 $script:ForecastSharedHelpers = @(
     'Write-FinOpsConsole', 'Get-MenuWidth', 'Test-FinOpsRichConsole', 'Move-FinOpsCursorLine', 'Read-FinOpsAnswer',
     'Protect-FinOpsExportText', 'ConvertTo-FinOpsExportCell', 'Get-FinOpsReportRoot', 'Assert-FinOpsReportPath',
-    'New-FinOpsReportDirectory', 'Write-FinOpsReportFile', 'Select-Subscription'
+    'New-FinOpsReportDirectory', 'Write-FinOpsReportFile', 'Select-Subscription',
+    'Get-FinOpsTenantChoice', 'Step-FinOpsTenantPicker', 'Select-FinOpsTenant', 'Connect-FinOpsAzAccount'
 )
 $explorerScript = Join-Path $multitoolRoot 'Invoke-FinOpsMultitool.ps1'
 $parseErrors = $null

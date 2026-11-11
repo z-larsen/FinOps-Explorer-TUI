@@ -155,14 +155,19 @@ Describe 'Tenant workspaces' {
         InModuleScope FinOpsForecast -Parameters @{ Text = $Text; Expected = $Expected } { ConvertTo-ForecastWorkspaceName -Text $Text | Should -Be $Expected }
     }
 
-    It 'Adds the start of the tenant ID, and falls back to the domain or the ID alone' {
-        InModuleScope FinOpsForecast -Parameters @{ TenantId = $script:TenantId } {
+    It 'Uses the tenant''s domain, never its ID, and falls back to the name or <Fallback>' -ForEach @(
+        @{ Fallback = 'another domain'; Tenant = @{ Name = 'Contoso Synthetic'; DefaultDomain = ''; Domains = @('contoso-synth.example') }; Expected = 'contoso-synth-example' }
+        @{ Fallback = 'a hash'; Tenant = @{ Name = 'Contoso Synthetic'; DefaultDomain = '' }; Expected = 'contoso-synthetic-{hash}' }
+        @{ Fallback = 'tenant and a hash'; Tenant = $null; Expected = 'tenant-{hash}' }
+    ) {
+        # Mock bodies resolve variables where they're called, so the fixture isn't named like the function's $tenant.
+        InModuleScope FinOpsForecast -Parameters @{ TenantId = $script:TenantId; TestTenant = $Tenant; Expected = $Expected } {
             Mock Get-AzTenant { [pscustomobject]@{ Name = 'Contoso Synthetic'; DefaultDomain = 'contososynth.onmicrosoft.com' } }
-            Get-ForecastTenantWorkspaceName -TenantId $TenantId | Should -Be 'contoso-synthetic-00000000'
-            Mock Get-AzTenant { [pscustomobject]@{ Name = '????'; DefaultDomain = 'contososynth.onmicrosoft.com' } }
-            Get-ForecastTenantWorkspaceName -TenantId $TenantId | Should -Be 'contososynth-00000000'
-            Mock Get-AzTenant { throw 'not available' }
-            Get-ForecastTenantWorkspaceName -TenantId $TenantId | Should -Be 'tenant-00000000'
+            Get-ForecastTenantWorkspaceName -TenantId $TenantId | Should -Be 'contososynth'
+            if ($TestTenant) { Mock Get-AzTenant { [pscustomobject]$TestTenant } } else { Mock Get-AzTenant { throw 'not available' } }
+            $name = Get-ForecastTenantWorkspaceName -TenantId $TenantId
+            $name | Should -Be $Expected.Replace('{hash}', (Get-ForecastHash -Text $TenantId -Length 8))
+            $name | Should -Not -Match '00000000'
         }
     }
 }
@@ -363,7 +368,7 @@ Describe 'Forecast entry' {
         Set-TestAnswers @('')
         Invoke-FinOpsForecast -WorkspacePath $script:Base -AsOf $script:AsOf
         $script:Opened.Count | Should -Be 1
-        Split-Path $script:Opened[0] -Leaf | Should -Be 'contoso-synthetic-00000000'
+        Split-Path $script:Opened[0] -Leaf | Should -Be 'contososynth'
         Should -Invoke Start-ForecastGuidedSetup -ModuleName FinOpsForecast -Times 1 -Exactly -ParameterFilter { $Root -eq $script:Opened[0] -and @($Subscriptions).Count -eq 2 }
 
         # Once set up, the same tenant's workspace opens without asking again.

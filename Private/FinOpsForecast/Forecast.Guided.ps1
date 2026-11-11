@@ -39,19 +39,20 @@ function ConvertTo-ForecastWorkspaceName {
 }
 
 function Get-ForecastTenantWorkspaceName {
-    # The tenant's name plus the start of its ID, so two tenants with the
-    # same display name don't share a workspace.
+    # The tenant's default domain, which belongs to that tenant alone, so two
+    # tenants with the same display name never share a workspace and the
+    # tenant ID isn't shown. Without a domain, the tenant's name plus a short
+    # hash of its ID.
     param([Parameter(Mandatory)][string]$TenantId)
-    $suffix = ($TenantId -replace '[^0-9a-fA-F]', '').ToLowerInvariant()
-    $suffix = if ($suffix.Length -ge 8) { $suffix.Substring(0, 8) } else { 'unknown' }
     $tenant = $null
     try { $tenant = @(Get-AzTenant -TenantId $TenantId -ErrorAction Stop -WarningAction SilentlyContinue)[0] }
     catch { Write-Verbose "The tenant's name isn't available: $($_.Exception.Message)" }
-    foreach ($candidate in @([string]$tenant.Name, [string]$tenant.DefaultDomain)) {
-        $slug = ConvertTo-ForecastWorkspaceName -Text $candidate
-        if ($slug) { return "$slug-$suffix" }
-    }
-    return "tenant-$suffix"
+    $domain = [string]$tenant.DefaultDomain
+    if ([string]::IsNullOrWhiteSpace($domain)) { $domain = [string]@($tenant.Domains | Where-Object { $_ })[0] }
+    $slug = ConvertTo-ForecastWorkspaceName -Text $domain
+    if ($slug) { return $slug }
+    $name = ConvertTo-ForecastWorkspaceName -Text ([string]$tenant.Name)
+    return "$(if ($name) { $name } else { 'tenant' })-$(Get-ForecastHash -Text $TenantId.Trim().ToLowerInvariant() -Length 8)"
 }
 
 function Test-ForecastWorkspaceConfigured {

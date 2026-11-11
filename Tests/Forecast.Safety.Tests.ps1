@@ -161,6 +161,20 @@ Describe 'Forecast safety' {
         $shared = InModuleScope FinOpsForecast { $script:ForecastSharedHelpers }
         foreach ($name in $shared) { @($definitions | Where-Object Name -EQ $name).Count | Should -Be 1 -Because "$name is loaded from Explorer's launcher" }
     }
+
+    It 'Loads every Explorer function the shared helpers call' {
+        $definitions = @((Get-TestAst $script:ExplorerScript).FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $true))
+        $explorerFunctions = @($definitions.Name | Sort-Object -Unique)
+        $shared = InModuleScope FinOpsForecast { $script:ForecastSharedHelpers }
+        $missing = foreach ($name in $shared) {
+            $definition = @($definitions | Where-Object Name -EQ $name)[0]
+            foreach ($command in $definition.Body.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] }, $true)) {
+                $called = $command.GetCommandName()
+                if ($called -and $called -in $explorerFunctions -and $called -notin $shared) { "$name calls $called" }
+            }
+        }
+        @($missing | Sort-Object -Unique) | Should -BeNullOrEmpty
+    }
 }
 
 Describe 'FinOps Explorer integration' {
