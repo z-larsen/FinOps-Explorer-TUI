@@ -37,15 +37,22 @@ function Edit-ForecastSources {
         $sources = @($settings.sources)
         for ($i = 0; $i -lt $sources.Count; $i++) {
             $s = $sources[$i]
-            $location = if ($s.kind -eq 'LocalFolder') { $s.path } else { "$(([string]$s.storageResourceId) -replace '^.*/storageAccounts/', '')/$($s.container)/$($s.prefix)" }
+            $location = switch ([string]$s.kind) {
+                'LocalFolder' { $s.path }
+                'CostDetails' {
+                    $range = if ($s.fromMonth -or $s.toMonth) { ", $(if ($s.fromMonth) { $s.fromMonth } else { 'earliest' }) to $(if ($s.toMonth) { $s.toMonth } else { 'current' })" } else { '' }
+                    "$(Get-ForecastCostDetailsChunkDays -Source $s)-day reports$range | $((([string]$s.scope).Trim('/') -split '/' | Select-Object -Last 2) -join '/')"
+                }
+                default { "$(([string]$s.storageResourceId) -replace '^.*/storageAccounts/', '')/$($s.container)/$($s.prefix)" }
+            }
             Write-FinOpsConsole ('  {0,2}  {1,-12} {2,-6} {3}  ({4})' -f ($i + 1), $s.kind, $s.agreement, (ConvertTo-ForecastSafeText $location 70), (ConvertTo-ForecastSafeText $s.label 40))
         }
         if ($sources.Count -eq 0) { Write-FinOpsConsole '  No export sources yet.' -ForegroundColor DarkGray }
         Write-FinOpsConsole "  Migration boundary: $(if ($settings.migration.boundaryDate) { "$($settings.migration.boundaryDate) (EA before, MCA on or after)" } else { 'not set' })"
         Write-FinOpsConsole ''
-        Write-FinOpsConsole '  D Discover exports in Azure   A Add storage location   L Add local folder   E Edit   X Remove' -ForegroundColor DarkGray
-        Write-FinOpsConsole '  M Switch between exports and manual inputs   T Set migration boundary   B Back' -ForegroundColor DarkGray
-        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid @('D', 'A', 'L', 'E', 'X', 'M', 'T', 'B') -Default 'B'
+        Write-FinOpsConsole '  D Discover exports in Azure   A Add storage location   L Add local folder   C Add Cost Details (live)' -ForegroundColor DarkGray
+        Write-FinOpsConsole '  E Edit   X Remove   M Switch between exports and manual inputs   T Set migration boundary   B Back' -ForegroundColor DarkGray
+        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid @('D', 'A', 'L', 'C', 'E', 'X', 'M', 'T', 'B') -Default 'B'
         switch ($choice) {
             'D' { Add-ForecastDiscoveredSources -Root $Root }
             'A' {
@@ -69,13 +76,49 @@ function Edit-ForecastSources {
                 $settings.sources = @($sources + $source)
                 Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings; Wait-ForecastKey
             }
+            'C' {
+                Write-FinOpsConsole '  Cost Details asks Cost Management for ActualCost reports at a subscription or billing scope.' -ForegroundColor DarkGray
+                Write-FinOpsConsole '  It reaches 13 months back, needs Cost Management read access there, and changes nothing in Azure.' -ForegroundColor DarkGray
+                $scope = Read-ForecastText -Prompt 'Scope (/subscriptions/<id> or /providers/Microsoft.Billing/billingAccounts/<id>[/billingProfiles/<id>])'
+                $days = Read-ForecastText -Prompt 'Days per report, 1 to 31 (use 1 for very large scopes)' -Default '7'
+                $from = Read-ForecastText -Prompt 'First month, yyyy-MM (blank for as far back as allowed)' -Default ''
+                $to = Read-ForecastText -Prompt 'Last month, yyyy-MM (blank for the current month)' -Default ''
+                $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, or MCA' -Valid @('AUTO', 'EA', 'MCA') -Default 'AUTO'
+                $parsedDays = 0
+                $source = [pscustomobject]@{
+                    id = New-ForecastSourceId -Seed $scope; kind = 'CostDetails'; label = Read-ForecastText -Prompt 'Label' -Default 'Cost Details'
+                    scope = ([string]$scope).Trim(); chunkDays = $(if ([int]::TryParse($days, [ref]$parsedDays)) { $parsedDays } else { $days })
+                    fromMonth = ([string]$from).Trim(); toMonth = ([string]$to).Trim()
+                    storageResourceId = ''; container = ''; prefix = ''; path = ''; agreement = $(if ($agreement -eq 'AUTO' -or -not $agreement) { 'Auto' } else { $agreement })
+                }
+                $problems = @(Test-ForecastSourceDefinition -Source $source)
+                if ($problems.Count) { foreach ($p in $problems) { Write-FinOpsConsole "  ! $($p.Message)" -ForegroundColor Yellow }; Wait-ForecastKey; continue }
+                $settings.sources = @($sources + $source)
+                Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings; Wait-ForecastKey
+            }
             'E' {
                 $number = 0
                 if (-not [int]::TryParse((Read-ForecastText -Prompt 'Source number'), [ref]$number) -or $number -lt 1 -or $number -gt $sources.Count) { continue }
                 $s = $sources[$number - 1]
                 $s.label = Read-ForecastText -Prompt 'Label' -Default $s.label
-                $s.prefix = (Read-ForecastText -Prompt 'Folder path' -Default $s.prefix).Trim('/')
-                $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, MCA, or FOCUS' -Valid @('AUTO', 'EA', 'MCA', 'FOCUS') -Default ([string]$s.agreement).ToUpperInvariant()
+                if ([string]$s.kind -eq 'CostDetails') {
+                    $days = Read-ForecastText -Prompt 'Days per report, 1 to 31' -Default ([string](Get-ForecastCostDetailsChunkDays -Source $s))
+                    $parsedDays = 0
+                    $values = [ordered]@{
+                        chunkDays = $(if ([int]::TryParse($days, [ref]$parsedDays)) { $parsedDays } else { $days })
+                        fromMonth = ([string](Read-ForecastText -Prompt 'First month, yyyy-MM, or NONE' -Default ([string]$s.fromMonth))).Trim()
+                        toMonth = ([string](Read-ForecastText -Prompt 'Last month, yyyy-MM, or NONE' -Default ([string]$s.toMonth))).Trim()
+                    }
+                    foreach ($name in @($values.Keys)) {
+                        $value = if ($values[$name] -match '^(?i)none$') { '' } else { $values[$name] }
+                        if ($s.PSObject.Properties[$name]) { $s.$name = $value } else { $s | Add-Member -NotePropertyName $name -NotePropertyValue $value }
+                    }
+                    $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, or MCA' -Valid @('AUTO', 'EA', 'MCA') -Default ([string]$s.agreement).ToUpperInvariant()
+                }
+                else {
+                    $s.prefix = (Read-ForecastText -Prompt 'Folder path' -Default $s.prefix).Trim('/')
+                    $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, MCA, or FOCUS' -Valid @('AUTO', 'EA', 'MCA', 'FOCUS') -Default ([string]$s.agreement).ToUpperInvariant()
+                }
                 $s.agreement = if ($agreement -eq 'AUTO' -or -not $agreement) { 'Auto' } else { $agreement }
                 Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings; Wait-ForecastKey
             }

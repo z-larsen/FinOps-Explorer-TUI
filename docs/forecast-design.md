@@ -10,9 +10,9 @@ The forecast does three things:
 - Forecasts a configurable fiscal year from pre-credit cost: actuals to date, plus a central estimate and a sensitivity range for the rest of the year.
 - Breaks growth down by workload.
 
-It reads Cost Management exports, or manual monthly inputs when exports aren't available.
+It reads Cost Management exports, live Cost Details reports, or manual monthly inputs when neither is available.
 
-It never writes to Azure. Writes go to the user's private workspace and report folders only. Automated tests enforce both rules.
+It never writes to Azure. Writes go to the user's private workspace and report folders only. Automated tests enforce both rules. The one request that isn't a plain read is the Cost Details source's POST to `generateCostDetailsReport`, which creates a temporary report rather than an Azure resource. The safety tests allow exactly that call, in one file, and nothing else.
 
 ## Where it lives
 
@@ -20,7 +20,7 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
 
 | Path | Purpose |
 |---|---|
-| `Private/FinOpsForecast/` | The forecast module: 18 PowerShell scripts, a module loader, and one C# reducer |
+| `Private/FinOpsForecast/` | The forecast module: 19 PowerShell scripts, a module loader, and one C# reducer |
 | `Public/Start-FinOpsForecast.ps1` | Public entry point |
 | `Private/FinOpsMultitool/Invoke-FinOpsMultitool.ps1` | One 9-line hook after the banner that offers the forecast. Skipped for `-NonInteractive`, `-Scans`, and `-DataSource` |
 | `scripts/Test-ToolkitParity.ps1` | Treats that hook as an allowed standalone overlay, next to the four version overlays |
@@ -33,6 +33,7 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
   - Storage listing and blob reads (`Get-StorageBlobList`, `Get-StorageBlobBytes`, `Get-ExportBlobSuffix`).
   - Export discovery (`Find-CostExport`, `Find-CostExportFromStorage`).
   - Private-directory creation (`New-FinOpsPrivateDirectory`).
+  - Resource Manager calls with retry and throttle handling (`Invoke-AzRestMethodWithRetry`, `Get-ServerRetryDelay`, `Get-FinOpsArmEndpoint`), used only by the Cost Details source.
 - Explorer's console and report helpers. These are nested inside `Invoke-FinOpsMultitool`, so the module loads them from that script's syntax tree:
   - Sign-in and subscription picking (`Select-Subscription`).
   - Report folders and files (`New-FinOpsReportDirectory`, `Write-FinOpsReportFile`, `Assert-FinOpsReportPath`).
@@ -43,10 +44,10 @@ The feature sits beside Explorer's runtime, not inside it, so syncs from the Fin
 
 ## Data flow
 
-1. **Discover runs.** List every blob under each source. Each `manifest.json` describes one run: `runId`, `submittedTime`, `startDate`, `endDate`, `exportConfig.resourceId` and `type`, and every partition with `byteCount` and `dataRowCount`. CSV files that no manifest claims become legacy runs, which need a reviewer's approval.
+1. **Discover runs.** List every blob under each source. Each `manifest.json` describes one run: `runId`, `submittedTime`, `startDate`, `endDate`, `exportConfig.resourceId` and `type`, and every partition with `byteCount` and `dataRowCount`. CSV files that no manifest claims become legacy runs, which need a reviewer's approval. A Cost Details source has nothing to list; see [Cost Details source](#cost-details-source).
 2. **Read runs.** Reject duplicate partition references, including aliases resolving to the same file. Download every distinct declared partition and check its byte count. Stream it through `TextFieldParser`, then check its row count. Any missing partition, size or row mismatch, unreadable row, or invalid manifest date range makes the run unusable instead of quietly short. So does amortized content: EA and MCA amortized files have the same columns as actual cost, so a run is rejected when reservation- or savings-plan-covered usage has a cost, or when it has unused-benefit charges. Actual cost has neither.
 3. **Reduce, then classify.** The C# reducer sums rows that share the same raw values into tuples. A PowerShell reducer with identical output covers hosts that block `Add-Type`. PowerShell then applies the rules once per tuple: schema, charge stream, publisher class, pricing model, agreement, migration-boundary side, and workload tag.
-4. **Cache.** Results are cached per run. The signature includes manifest dates and modification time, plus each partition's modification time, size, and declared counts. Same-size corrections are re-read when their modification time changes; missing partition timestamps disable reuse. The ingest profile includes source locations and schema overrides, the tag key, the boundary date, and the ingestion version. Changing it requires a refresh. If a previously usable cached run becomes unreadable or invalid, refresh fails and keeps the previous cache. A newly discovered incomplete run can still be recorded while an older complete run remains selected.
+4. **Cache.** Results are cached per run. The signature includes manifest dates and modification time, plus each partition's modification time, size, and declared counts. Same-size corrections are re-read when their modification time changes; missing partition timestamps disable reuse. The ingest profile includes source locations and schema overrides, the tag key, the boundary date, and the ingestion version. Changing it requires a refresh. If a previously usable cached run becomes unreadable or invalid, refresh fails and keeps the previous cache. A newly discovered incomplete run can still be recorded while an older complete run remains selected. The swap into place retries for a few seconds if Windows antivirus or indexing briefly holds a file that was just written.
 5. **Select.** For each (original scope, dataset, month), prefer a run that covers the whole month, then a legacy run, then one still in progress; among those, the latest complete, approved run wins. A run that starts after the first of the month can't stand in for it and raises a warning. A legacy file only counts as covering the whole month if its rows reach the month's last day; otherwise it's treated as still in progress. A month counts as final once a whole-month run was submitted at least the grace period after month end. A corrected rerun replaces the month instead of adding to it. Several legacy files for one month raise a warning, because they're more likely different datasets than reruns.
 6. **Assemble.** Apply overlap, boundary, scope, and filter rules, then reconcile every run-month to its raw total. Overlap is decided per subscription, or per billing profile for charges without a subscription. Check each row's date, not just its month, against the run range. Outside-range charges and row counts appear once, on that run's first selected reconciliation row, in both the raw total and the excluded amount. An end at midnight on the next month's first day is exclusive; other end dates are inclusive. A final month whose last charge precedes month end raises a warning.
 7. **Model, gate, report.** Run the forecast and the readiness checks, then write reports. Save a vintage only when the forecast is Ready. A rejected future window remains a blocking settings failure even when a fallback window is used for preview.
@@ -55,6 +56,19 @@ Legacy run identity includes the source ID, so identical relative filenames in
 different sources aren't discarded as duplicates. Only manifest-backed runs can
 share a run identity across sources. Folder dates never substitute for observed
 month-end coverage in a legacy file.
+
+### Cost Details source
+
+A `CostDetails` source (`Forecast.CostDetails.ps1`) produces the same run records as an export, so steps 2 to 7 don't change:
+
+- **Months.** Every whole month inside the API's 13-month reach (with a day's margin), then the current month through yesterday, narrowed by optional `fromMonth` and `toMonth`. On the first of a month, the current month is skipped.
+- **Runs and partitions.** One run per month, with a stable key per source, scope, and month so a new read replaces the cached one. Each run has one partition per chunk of `chunkDays` days (default 7, 1 to 31). The run is `ActualCost` with `HasManifest` set, its scope is the source scope, and `Submitted` is the refresh time, so finality and coverage follow the usual rules.
+- **Lazy generation.** Nothing is requested until ingestion reads a partition. Then one POST to `{scope}/providers/Microsoft.CostManagement/generateCostDetailsReport` asks for `ActualCost` for that chunk's dates; the scope is re-validated inside the function that sends it, and the safety tests allow only the partition read to call that function. The returned `Location` is followed only if it's on the signed-in cloud's Resource Manager host, for the same scope, and is a `costDetailsOperationResults` or `costDetailsOperationStatus` path. Polling honors `Retry-After` (5 to 300 seconds) for up to 30 minutes.
+- **Manifest checks.** `NoDataFound` reads as an empty partition. `Completed` must echo the requested scope, dates, and `ActualCost`; a missing echo fails the chunk. It must also be uncompressed CSV, with file counts and byte totals that match. Each file is downloaded without credentials or redirects, from an HTTPS blob endpoint of the signed-in cloud, and must be exactly its declared size. A connection that sends nothing for five minutes fails the chunk. Files in one report are joined with the header kept once. Cost Details manifests have no row counts, so verification rests on byte counts and a clean parse.
+- **Links.** Download links are SAS URLs. They live only in local variables inside the partition read and never reach messages, the cache, or reports. A test fails if any workspace file or message contains them.
+- **Reuse.** A cached Complete month read at least the grace period after month end is reused without a request. Other months are reused if read under four hours ago for the same days, since Cost Management refreshes these reports about every four hours. Final months this source read earlier but the API can no longer reach are carried forward, within the source's `fromMonth` and `toMonth`. Until last month passes its grace period, the forecast window starts one month beyond the API's reach, so dropping them would open a gap. Because those months can't be read again, Cost Details records carry a per-source profile hash (ingest version, tag key, boundary, and that source's settings) instead of the workspace-wide one, so adding or editing another source keeps them. When a tag key, boundary, or source change does invalidate them, the refresh warns and names the months it dropped.
+- **Failures.** A chunk failure makes its month Incomplete, like a missing partition. A 429 after Explorer's retries pauses further Cost Details requests until the service's retry time. If a refresh fails outright, any month this attempt read completely replaces its own record in the previous cache, so a long first pull resumes instead of restarting. The previous cache's workspace profile hash is kept, so a pending settings change still asks for a refresh.
+- **Charge dates.** Learn ties the data to when the billing system received a cost. A charge dated before the requested month is excluded and reported as outside the run's range, never moved into the earlier month.
 
 ### Charge streams
 
@@ -121,6 +135,9 @@ Checked on Microsoft Learn, November 2026.
 | FOCUS `BilledCost` is the invoicing basis; `x_PublisherCategory` separates vendors from the cloud provider | [FOCUS schema](https://learn.microsoft.com/azure/cost-management-billing/dataset-schema/cost-usage-details-focus) |
 | EA cost history stays in the EA scope after moving to MCA | [Onboard MCA](https://learn.microsoft.com/azure/cost-management-billing/manage/onboard-microsoft-customer-agreement) |
 | A billing period closes up to 72 hours after it ends; export files aren't rounded | [Understand Cost Management data](https://learn.microsoft.com/azure/cost-management-billing/costs/understand-cost-mgt-data) |
+| Cost Details covers EA and MCA only, needs read-only permissions at the scope, doesn't support management groups, returns one month or less per report, and reaches 13 months back | [Get small cost datasets on demand](https://learn.microsoft.com/azure/cost-management-billing/automate/get-small-usage-datasets-on-demand), [Create Operation](https://learn.microsoft.com/rest/api/cost-management/generate-cost-details-report/create-operation) |
+| Cost Details is asynchronous: 202 with `Location` and `Retry-After`; results are `Completed`, `NoDataFound`, or `Failed`; a completed manifest lists blob links with byte counts and a `validTill` time | [Get Operation Results](https://learn.microsoft.com/rest/api/cost-management/generate-cost-details-report/get-operation-results) |
+| Cost Details data corresponds to when the billing system received the cost and may span invoices; reports refresh about every four hours; above roughly 2 GB or 2 million rows a month, chunk by day or week or use Exports | [Get small cost datasets on demand](https://learn.microsoft.com/azure/cost-management-billing/automate/get-small-usage-datasets-on-demand) |
 
 ## Unknowns and how they're handled
 
@@ -131,6 +148,7 @@ Checked on Microsoft Learn, November 2026.
 | Row layout in the transition month | A confirmed boundary date; EA rows on or after it and MCA rows before it are excluded and reported |
 | Manifest differences across export API versions, and legacy exports | Legacy files need an explicit approval |
 | Linux and macOS behavior | The code avoids Windows-only APIs, but only Windows has been run |
+| Cost Details on a live tenant: column casing, how often charges land outside their month, link lifetime, and rate limits at volume | Untested against real data. Schema detection and the source's schema setting cover casing; outside-month charges are reported, not counted; expired links fail the month for the next refresh to retry; throttling pauses requests |
 
 Validating these against sanitized real exports is the main open task.
 
@@ -162,6 +180,7 @@ Validating these against sanitized real exports is the main open task.
 | Rounding isn't a reconciliation failure | Exports: differences under 0.000001 pass, larger ones fail |
 | One-off spikes | Engine: the drop back after a spike is suggested as Exclude; a drop that settles at a new level is still a step change |
 | Display names | Workloads: subscriptions with the same name get a short ID |
+| Cost Details source | `Forecast.CostDetails.Tests.ps1`, against a synthetic API: month planning and chunking; scope and settings validation; one POST per chunk with the exact path and body; status links on another host, scope, or operation refused; mismatched or missing manifest echoes rejected; NoDataFound; access and throttle failures; credential-free, redirect-free, size-checked downloads over loopback, including a stalled connection; closed months reused and the open month re-read after four hours; final months beyond the API's reach kept while the window needs them; links never persisted; months kept after a failed refresh; outside-month charges reported; EA enrollment and MCA billing profile joined at the boundary. Safety: only that file may POST, only to `generateCostDetailsReport`, only from a partition read, with GET-only downloads |
 
 ## Checked against the FinOps toolkit sample
 
@@ -193,6 +212,7 @@ The PowerShell reducer only runs when the host blocks `Add-Type`, for example in
 ## Follow-ups
 
 - Validate the unknowns above with sanitized EA and MCA exports.
+- Run a Cost Details source against a live EA and MCA tenant, starting with a narrow month range, and record generation time, link lifetime, and throttling.
 - Run the suite on Linux and macOS.
 - Faster CSV parsing for wide rows; `TextFieldParser` is the main cost of a first refresh.
 - Optional sources: a FinOps hub (Kusto `Costs()` with `BilledCost`) and Parquet exports.

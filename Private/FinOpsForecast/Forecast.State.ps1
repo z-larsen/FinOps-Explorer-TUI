@@ -166,6 +166,21 @@ function Set-ForecastReviewDecision {
     $null = Write-ForecastStateJson -Root $Root -RelativePath 'reviews.json' -Value ([pscustomobject]$ordered)
 }
 
+function Move-ForecastStateDirectory {
+    # Antivirus and search indexing can briefly lock files that were just
+    # written, so a directory rename can fail with access denied. Retry for a
+    # few seconds before giving up.
+    param([Parameter(Mandatory)][string]$Source, [Parameter(Mandatory)][string]$Destination)
+    for ($attempt = 1; ; $attempt++) {
+        try { [IO.Directory]::Move($Source, $Destination); return }
+        catch {
+            $reason = $_.Exception.GetBaseException()
+            if ($attempt -ge 6 -or -not ($reason -is [IO.IOException] -or $reason -is [UnauthorizedAccessException])) { throw }
+            Start-Sleep -Milliseconds (250 * $attempt)
+        }
+    }
+}
+
 # -- Refresh cache ---------------------------------------------------------
 function Get-ForecastCache {
     # Returns the last successful refresh, restoring it if a previous swap
@@ -175,7 +190,7 @@ function Get-ForecastCache {
     $current = Join-Path $cacheDirectory 'current'
     if (-not [IO.Directory]::Exists($current) -and [IO.Directory]::Exists($cacheDirectory)) {
         $previous = @([IO.Directory]::GetDirectories($cacheDirectory, 'previous-*') | Sort-Object -Descending)[0]
-        if ($previous) { [IO.Directory]::Move($previous, $current) }
+        if ($previous) { Move-ForecastStateDirectory -Source $previous -Destination $current }
     }
     $meta = Read-ForecastStateJson -Root $Root -RelativePath 'cache/current/cache.json'
     if (-not $meta) { return $null }
@@ -209,9 +224,9 @@ function Publish-ForecastCache {
         $previous = $null
         if ([IO.Directory]::Exists($current)) {
             $previous = Join-Path $cacheDirectory "previous-$([datetime]::UtcNow.ToString('yyyyMMddTHHmmssfff', $script:ForecastInvariant))"
-            [IO.Directory]::Move($current, $previous)
+            Move-ForecastStateDirectory -Source $current -Destination $previous
         }
-        [IO.Directory]::Move((Join-Path $cacheDirectory $staging), $current)
+        Move-ForecastStateDirectory -Source (Join-Path $cacheDirectory $staging) -Destination $current
         [void]$script:ForecastPrivateDirectories.Remove((Join-Path $cacheDirectory $staging))
         if ($previous) { Remove-Item -LiteralPath $previous -Recurse -Force -ErrorAction SilentlyContinue }
     }

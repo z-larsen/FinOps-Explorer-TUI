@@ -31,6 +31,28 @@ Describe 'Workspace state' {
         }
     }
 
+    It 'Retries a cache directory rename while a file is briefly locked' -Skip:(-not $IsWindows) {
+        # Windows refuses to rename a folder while a file in it is open, as
+        # antivirus scanning briefly does after a refresh writes the cache.
+        $base = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $source = Join-Path $base 'staging'
+        [void][IO.Directory]::CreateDirectory($source)
+        $file = Join-Path $source 'run.json'
+        [IO.File]::WriteAllText($file, '{}')
+        $lock = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        $release = [powershell]::Create().AddScript({ param($Handle) Start-Sleep -Milliseconds 400; $Handle.Dispose() }).AddArgument($lock)
+        $pending = $release.BeginInvoke()
+        try {
+            InModuleScope FinOpsForecast -Parameters @{ Source = $source; Destination = (Join-Path $base 'current') } { Move-ForecastStateDirectory -Source $Source -Destination $Destination }
+            Test-Path -LiteralPath (Join-Path $base 'current/run.json') | Should -BeTrue
+        }
+        finally {
+            [void]$pending.AsyncWaitHandle.WaitOne(5000)
+            $release.Dispose()
+            $lock.Dispose()
+        }
+    }
+
     It 'Never overwrites a vintage' {
         $root = New-TestWorkspace
         InModuleScope FinOpsForecast -Parameters @{ Root = $root } {

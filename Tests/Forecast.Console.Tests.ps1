@@ -56,6 +56,28 @@ Describe 'Forecast console' {
         ($script:Console.Text -join "`n") | Should -Match 'Forecast saved'
     }
 
+    It 'Adds and edits a Cost Details source' {
+        $root = Get-Workspace -Name 'console-costdetails'
+        InModuleScope FinOpsForecast -Parameters @{ Root = $root; Settings = (New-TestSettings) } { Save-ForecastStoredSettings -Root $Root -Settings $Settings }
+        Set-TestAnswers @(
+            'C', $script:ProfileScope, '1', '2026-07', '', 'MCA', 'Live MCA', ''
+            'E', '1', 'Renamed', '7', 'NONE', '2026-10', 'EA', ''
+            'B'
+        )
+        InModuleScope FinOpsForecast -Parameters @{ Root = $root } { Edit-ForecastSources -Root $Root }
+        Get-RedLines | Should -BeNullOrEmpty
+        $script:Answers.Count | Should -Be 0
+        $source = @((InModuleScope FinOpsForecast -Parameters @{ Root = $root } { Get-ForecastStoredSettings -Root $Root }).sources)[0]
+        $source.kind | Should -Be 'CostDetails'
+        $source.scope | Should -Be $script:ProfileScope
+        $source.label | Should -Be 'Renamed'
+        $source.chunkDays | Should -Be 7
+        $source.fromMonth | Should -Be ''
+        $source.toMonth | Should -Be '2026-10'
+        $source.agreement | Should -Be 'EA'
+        ($script:Console.Text -join "`n") | Should -Match '7-day reports, earliest to 2026-10 \| billingProfiles/BP-SYNTH-01'
+    }
+
     It 'Enters, approves, and forecasts manual inputs' {
         $root = Get-Workspace -Name 'console-manual'
         $settings = New-TestSettings -Mode 'Manual'

@@ -8,12 +8,15 @@ param()
 # FORECAST.SOURCES.PS1
 # EXPORT LOCATIONS AND RUN DISCOVERY
 ###########################################################################
-# Two read-only locations are supported:
+# Three read-only locations are supported:
 # - AzureStorage: the storage account and container an export delivers to.
 #   Listing and downloads reuse FinOps Explorer's storage helpers with an
 #   Entra ID token (Storage Blob Data Reader on the account).
 # - LocalFolder:  a local copy of that container with the same folder layout,
 #   for example one made with AzCopy or Storage Explorer.
+# - CostDetails:  ActualCost reports generated on demand by Cost Management
+#   at a subscription or billing scope. Runs come from
+#   Get-ForecastCostDetailsRuns (Forecast.CostDetails.ps1), not a listing.
 #
 # Each export run writes manifest.json beside its partitions. The manifest
 # lists runInfo (runId, submittedTime, startDate, endDate), exportConfig
@@ -105,6 +108,7 @@ function Read-ForecastSourceBlob {
             if ($null -eq $bytes) { throw "Blob '$(ConvertTo-ForecastSafeText $Name 200)' couldn't be read." }
             return , $bytes
         }
+        'CostDetails' { return , (Read-ForecastCostDetailsPartition -Source $Source -Name $Name) }
         default { throw "Unknown source kind '$($Source.kind)'." }
     }
 }

@@ -13,8 +13,9 @@ param()
 function Update-ForecastExportCache {
     # Reads every source, reusing cached runs whose manifest, partitions, and
     # ingest profile are unchanged. The new cache replaces the old one only
-    # when every source was read; otherwise the previous cache stays in use.
-    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Settings)
+    # when every source was read; otherwise the previous cache stays in use,
+    # plus any Cost Details months this attempt read completely.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Settings, [datetime]$Now = [datetime]::UtcNow)
     $started = [datetime]::UtcNow
     $ingestProfile = Get-ForecastIngestProfile -Settings $Settings
     $existing = $null
@@ -22,36 +23,67 @@ function Update-ForecastExportCache {
     $cachedByKey = @{}
     if ($existing) { foreach ($result in $existing.Results) { $cachedByKey[[string]$result.RunKey] = $result } }
     $runTexts = [Collections.Generic.List[object]]::new()
-    $read = 0; $reused = 0
+    $checkpoint = [Collections.Generic.List[object]]::new()
+    $read = 0; $reused = 0; $incomplete = 0
+    $notes = [Collections.Generic.List[string]]::new()
     try {
         $sourceIndex = 0
         foreach ($source in @($Settings.sources)) {
             $sourceIndex++
             Write-Progress -Id 81 -Activity 'Refreshing export history' -Status "Source $sourceIndex of $(@($Settings.sources).Count): $(ConvertTo-ForecastSafeText $source.label 80)"
-            $blobs = Get-ForecastSourceBlobs -Source $source
-            $runs = Find-ForecastExportRuns -Source $source -Blobs $blobs
+            $costDetails = [string]$source.kind -eq 'CostDetails'
+            # Cost Details records carry their own source's profile hash; see Get-ForecastIngestProfile.
+            $sourceProfile = $ingestProfile
+            if ($costDetails) {
+                $runs = Get-ForecastCostDetailsRuns -Source $source -Now $Now
+                $sourceProfile = [pscustomobject]@{ Values = $ingestProfile.Values; Hash = [string]$ingestProfile.SourceHashes[[string]$source.id] }
+            }
+            else {
+                $blobs = Get-ForecastSourceBlobs -Source $source
+                $runs = Find-ForecastExportRuns -Source $source -Blobs $blobs
+            }
             $runIndex = 0
             foreach ($run in $runs) {
                 $runIndex++
                 Write-Progress -Id 82 -ParentId 81 -Activity 'Reading export runs' -Status "Run $runIndex of $($runs.Count)" -PercentComplete ([int](100 * $runIndex / [math]::Max(1, $runs.Count)))
                 $cached = $cachedByKey[[string]$run.RunKey]
                 $text = $null
-                $hasPartitionVersions = @($run.Parts | Where-Object { -not $_.LastModified }).Count -eq 0
-                $runHasErrors = @($run.Issues | Where-Object Severity -EQ 'Fail').Count -gt 0
-                if ($cached -and -not $runHasErrors -and $hasPartitionVersions -and $cached.Signature -eq (Get-ForecastRunSignature -Run $run) -and $cached.ProfileHash -eq $ingestProfile.Hash -and $cached.Status -in 'Complete', 'Unverified', 'Unsupported') {
+                if ($costDetails) { $canReuse = Test-ForecastCostDetailsReuse -Cached $cached -Run $run -ProfileHash $sourceProfile.Hash -GraceDays ([int]$Settings.period.graceDays) -Now $Now }
+                else {
+                    $hasPartitionVersions = @($run.Parts | Where-Object { -not $_.LastModified }).Count -eq 0
+                    $runHasErrors = @($run.Issues | Where-Object Severity -EQ 'Fail').Count -gt 0
+                    $canReuse = $cached -and -not $runHasErrors -and $hasPartitionVersions -and $cached.Signature -eq (Get-ForecastRunSignature -Run $run) -and $cached.ProfileHash -eq $ingestProfile.Hash -and $cached.Status -in 'Complete', 'Unverified', 'Unsupported'
+                }
+                if ($canReuse) {
                     $text = Get-ForecastCachedRunText -Root $Root -RunKey $run.RunKey
                     if ($text) { $reused++ }
                 }
                 if (-not $text) {
-                    $result = Invoke-ForecastRunIngest -Source $source -Run $run -IngestProfile $ingestProfile
+                    $result = Invoke-ForecastRunIngest -Source $source -Run $run -IngestProfile $sourceProfile
                     if ($cached -and $cached.Status -in 'Complete', 'Unverified' -and $result.Status -notin 'Complete', 'Unverified') {
                         $reason = @($result.Issues | Where-Object Severity -EQ 'Fail' | ForEach-Object Message) -join ' '
                         throw "Previously usable run $(ConvertTo-ForecastSafeText $run.RunId 80) is now $($result.Status). The previous cache was retained. $reason"
                     }
                     $text = ConvertTo-ForecastCacheRecord -Result $result | ConvertTo-Json -Depth 20 -Compress
                     $read++
+                    if ($result.Status -in 'Incomplete', 'Invalid') { $incomplete++ }
+                    if ($costDetails -and $result.Status -eq 'Complete') { $checkpoint.Add([pscustomobject]@{ RunKey = [string]$run.RunKey; Text = $text }) }
                 }
                 $runTexts.Add([pscustomobject]@{ RunKey = [string]$run.RunKey; Text = $text })
+            }
+            if ($costDetails) {
+                $retention = Get-ForecastCostDetailsRetainedKeys -Source $source -Runs @($runs) -Cached @($cachedByKey.Values) -ProfileHash $sourceProfile.Hash -GraceDays ([int]$Settings.period.graceDays)
+                foreach ($runKey in $retention.Keys) {
+                    $text = Get-ForecastCachedRunText -Root $Root -RunKey $runKey
+                    if (-not $text) { continue }
+                    $runTexts.Add([pscustomobject]@{ RunKey = $runKey; Text = $text })
+                    $reused++
+                }
+                if (@($retention.Dropped).Count) {
+                    $note = "$(ConvertTo-ForecastSafeText $source.label 80): $(@($retention.Dropped) -join ', ') can't be read again from Cost Details and were read before the tag key, migration boundary, or this source's settings changed, so they're no longer used."
+                    $notes.Add($note)
+                    Write-Warning $note
+                }
             }
         }
         Write-Progress -Id 82 -Activity 'Reading export runs' -Completed
@@ -60,14 +92,55 @@ function Update-ForecastExportCache {
         Publish-ForecastCache -Root $Root -RunTexts $runTexts.ToArray() -Meta $meta
         $entry = [pscustomobject]@{ AttemptUtc = $started.ToString('o', $script:ForecastInvariant); Result = 'Succeeded'; Error = $null; RunsRead = $read; RunsReused = $reused; DurationSeconds = [int]([datetime]::UtcNow - $started).TotalSeconds }
         Add-ForecastRefreshLog -Root $Root -Entry $entry
-        return [pscustomobject]@{ Succeeded = $true; Error = $null; RunsRead = $read; RunsReused = $reused }
+        return [pscustomobject]@{ Succeeded = $true; Error = $null; RunsRead = $read; RunsReused = $reused; RunsIncomplete = $incomplete; Notes = $notes.ToArray() }
     }
     catch {
         Write-Progress -Id 82 -Activity 'Reading export runs' -Completed
         Write-Progress -Id 81 -Activity 'Refreshing export history' -Completed
         $message = ConvertTo-ForecastSafeText -Text $_.Exception.Message -MaxLength 400
+        $kept = Save-ForecastRefreshCheckpoint -Root $Root -Existing $existing -RunTexts $checkpoint.ToArray() -IngestProfile $ingestProfile -Settings $Settings -Started $started
+        if ($kept) { $message += " $kept Cost Details month(s) read completely in this attempt were kept; refresh again to continue." }
         Add-ForecastRefreshLog -Root $Root -Entry ([pscustomobject]@{ AttemptUtc = $started.ToString('o', $script:ForecastInvariant); Result = 'Failed'; Error = $message; RunsRead = $read; RunsReused = $reused; DurationSeconds = [int]([datetime]::UtcNow - $started).TotalSeconds })
-        return [pscustomobject]@{ Succeeded = $false; Error = $message; RunsRead = $read; RunsReused = $reused }
+        return [pscustomobject]@{ Succeeded = $false; Error = $message; RunsRead = $read; RunsReused = $reused; RunsIncomplete = $incomplete; Notes = $notes.ToArray() }
+    }
+}
+
+function Save-ForecastRefreshCheckpoint {
+    # A first Cost Details pull can take an hour, so months a failed refresh
+    # read completely are kept and the next refresh resumes. Each kept month
+    # replaces only its own record; the rest of the previous cache, including
+    # its profile hash, is unchanged, so a pending settings change still asks
+    # for a refresh.
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [AllowNull()]$Existing,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$RunTexts,
+        [Parameter(Mandatory)]$IngestProfile,
+        [Parameter(Mandatory)]$Settings,
+        [Parameter(Mandatory)][datetime]$Started
+    )
+    if ($RunTexts.Count -eq 0) { return 0 }
+    try {
+        $texts = [ordered]@{}
+        if ($Existing) {
+            foreach ($runKey in @($Existing.Meta.runKeys)) {
+                $text = Get-ForecastCachedRunText -Root $Root -RunKey $runKey
+                if (-not $text) { return 0 }
+                $texts[[string]$runKey] = $text
+            }
+        }
+        foreach ($run in $RunTexts) { $texts[[string]$run.RunKey] = $run.Text }
+        $meta = [pscustomobject]@{
+            refreshedUtc = if ($Existing) { [string]$Existing.Meta.refreshedUtc } else { $Started.ToString('o', $script:ForecastInvariant) }
+            profileHash = if ($Existing) { [string]$Existing.Meta.profileHash } else { $IngestProfile.Hash }; runKeys = @($texts.Keys)
+            sourceIds = if ($Existing) { @($Existing.Meta.sourceIds) } else { @($Settings.sources.id) }
+        }
+        Publish-ForecastCache -Root $Root -RunTexts @(foreach ($key in $texts.Keys) { [pscustomobject]@{ RunKey = [string]$key; Text = $texts[$key] } }) -Meta $meta
+        return $RunTexts.Count
+    }
+    catch {
+        Write-Warning "The months read before the failure couldn't be kept: $(ConvertTo-ForecastSafeText $_.Exception.Message 200)"
+        return 0
     }
 }
 
