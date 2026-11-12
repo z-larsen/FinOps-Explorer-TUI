@@ -238,7 +238,7 @@ Describe 'Guided setup' {
     }
 
     It 'Reads a few subscriptions live, one monthly report each, and refreshes' {
-        Set-TestAnswers @('1', '6', '7', 'Y')
+        Set-TestAnswers @('6', '7', '1', 'Y')
         InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Start-ForecastGuidedSetup -Root $Root -AsOf $AsOf | Should -BeTrue }
         $settings = Get-TestSettings -Root $script:Root
         $settings.dataMode | Should -Be 'Exports'
@@ -254,15 +254,22 @@ Describe 'Guided setup' {
         $settings.method.minimumRetained | Should -Be 3
         $settings.period.fiscalYearStartMonth | Should -Be 7
         # 2026-05 through November, for each subscription.
-        ($script:Console -join "`n") | Should -Match 'asks Cost Management for 14 reports'
+        ($script:Console -join "`n") | Should -Match 'asks Cost Management for 14 reports, about 8 minutes'
         ($script:Console -join "`n") | Should -Match 'the forecast will be Preliminary'
         ($script:Console -join "`n") | Should -Not -Match 'The fiscal year started in'
+        # The readout comes before the source question, without the billing account for two subscriptions.
+        $text = $script:Console -join "`n"
+        $text.IndexOf('How the forecast is built') | Should -BeLessThan $text.IndexOf('Where should the cost history come from?')
+        $text | Should -Match 'Fastest\s+Cost Management exports'
+        $text | Should -Match 'Slowest\s+Live, each subscription'
+        $text | Should -Not -Match 'Live, at the billing account'
+        $text | Should -Match 'More than 3 months\? Use exports'
         Should -Invoke Invoke-ForecastConsoleRefresh -ModuleName FinOpsForecast -Times 1 -Exactly
         $script:Answers.Count | Should -Be 0
     }
 
     It 'Reaches back to the fiscal year''s start when it''s before a short lookback' {
-        Set-TestAnswers @('1', '6', '1', 'N')
+        Set-TestAnswers @('6', '1', '1', 'N')
         InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Start-ForecastGuidedSetup -Root $Root -AsOf $AsOf | Should -BeTrue }
         $settings = Get-TestSettings -Root $script:Root
         $settings.period.fiscalYearStartMonth | Should -Be 1
@@ -276,7 +283,7 @@ Describe 'Guided setup' {
     It 'Offers the owning billing account for many subscriptions' {
         $script:TestSubscriptions = @(New-TestSubscriptions -Count 5)
         Mock Get-ForecastCostDetailsBillingScopes -ModuleName FinOpsForecast { @([pscustomobject]@{ Scope = '/providers/Microsoft.Billing/billingAccounts/aaaa:bbbb_2019-05-31'; Name = 'Synthetic MCA'; Agreement = 'MCA' }) }
-        Set-TestAnswers @('1', '12', '7', '1', 'N')
+        Set-TestAnswers @('12', '7', '1', '1', 'N')
         InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Start-ForecastGuidedSetup -Root $Root -AsOf $AsOf | Should -BeTrue }
         $settings = Get-TestSettings -Root $script:Root
         @($settings.sources).Count | Should -Be 1
@@ -289,24 +296,53 @@ Describe 'Guided setup' {
         $settings.method.minimumRetained | Should -Be 8
         @($settings.scope.subscriptionIds).Count | Should -Be 5
         # 2025-11 through November 2026 in weekly reports.
-        ($script:Console -join "`n") | Should -Match 'asks Cost Management for 61 reports'
+        ($script:Console -join "`n") | Should -Match 'asks Cost Management for 61 reports, about 1 hour'
+        ($script:Console -join "`n") | Should -Match 'Live, at the billing account\n: available: Synthetic MCA \(MCA\)'
+        # Checked once, before the estimates, and reused for the live read.
+        Should -Invoke Get-ForecastCostDetailsBillingScopes -ModuleName FinOpsForecast -Times 1 -Exactly
         Should -Invoke Invoke-ForecastConsoleRefresh -ModuleName FinOpsForecast -Times 0 -Exactly
+        $script:Answers.Count | Should -Be 0
+    }
+
+    It 'Defaults to whichever live read the estimates say is faster for <Count> subscriptions' -ForEach @(
+        @{ Count = 5; Expected = 5 }
+        @{ Count = 10; Expected = 1 }
+    ) {
+        $subscriptions = @(for ($i = 1; $i -le $Count; $i++) { [pscustomobject]@{ Id = ('{0:d8}-0000-4000-8000-000000000000' -f $i); Name = "sub-synth-$i"; TenantId = $script:TenantId; State = 'Enabled' } })
+        Set-TestAnswers @('')
+        $check = [pscustomobject]@{ Accounts = @([pscustomobject]@{ Scope = '/providers/Microsoft.Billing/billingAccounts/aaaa:bbbb_2019-05-31'; Name = 'Synthetic MCA'; Agreement = 'MCA' }) }
+        # Five subscriptions need 65 monthly reports against 61 weekly ones; ten need 130.
+        $created = InModuleScope FinOpsForecast -Parameters @{ TestSubscriptions = $subscriptions; Check = $check; AsOf = $script:AsOf } {
+            Get-ForecastGuidedLiveSources -Subscriptions $TestSubscriptions -EarliestMonth '2025-11' -AsOf $AsOf -BillingCheck $Check
+        }
+        @($created).Count | Should -Be $Expected
+    }
+
+    It 'Uses 12 months when more are asked for and the history is read live' {
+        Set-TestAnswers @('24', '7', '1', 'N')
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Start-ForecastGuidedSetup -Root $Root -AsOf $AsOf | Should -BeTrue }
+        $settings = Get-TestSettings -Root $script:Root
+        $settings.period.lookbackMonths | Should -Be 12
+        $settings.method.minimumRetained | Should -Be 8
+        ($script:Console -join "`n") | Should -Match 'Live reads reach back 12 months\.'
+        ($script:Console -join "`n") | Should -Match 'live reads use 12 months of history'
         $script:Answers.Count | Should -Be 0
     }
 
     It 'Falls back to each subscription when no billing account can be read' {
         $script:TestSubscriptions = @(New-TestSubscriptions -Count 5)
         Mock Get-ForecastCostDetailsBillingScopes -ModuleName FinOpsForecast { , [object[]]@() }
-        Set-TestAnswers @('1', '12', '1', 'N')
+        Set-TestAnswers @('12', '1', '1', 'N')
         InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { $null = Start-ForecastGuidedSetup -Root $Root -AsOf $AsOf }
         @((Get-TestSettings -Root $script:Root).sources).Count | Should -Be 5
         ($script:Console -join "`n") | Should -Match 'each subscription is read separately'
+        ($script:Console -join "`n") | Should -Match 'Live, at the billing account\n: not available with this sign-in'
     }
 
     It 'Sets up a local export folder' {
         $folder = Join-Path $TestDrive 'synthetic-exports'
         [void][IO.Directory]::CreateDirectory($folder)
-        Set-TestAnswers @('2', '12', '1', '3', $folder, '', 'AUTO', 'Synthetic copy', 'N')
+        Set-TestAnswers @('12', '1', '2', '3', $folder, '', 'AUTO', 'Synthetic copy', 'N')
         InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Start-ForecastGuidedSetup -Root $Root -AsOf $AsOf | Should -BeTrue }
         $source = @((Get-TestSettings -Root $script:Root).sources)[0]
         $source.kind | Should -Be 'LocalFolder'
@@ -316,7 +352,7 @@ Describe 'Guided setup' {
     }
 
     It 'Switches to manual inputs without a source' {
-        Set-TestAnswers @('3', '6', '4')
+        Set-TestAnswers @('6', '4', '3')
         InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Start-ForecastGuidedSetup -Root $Root -AsOf $AsOf | Should -BeTrue }
         $settings = Get-TestSettings -Root $script:Root
         $settings.dataMode | Should -Be 'Manual'
@@ -328,7 +364,7 @@ Describe 'Guided setup' {
     }
 
     It 'Changes nothing when no source choice is made' {
-        Set-TestAnswers @('x', 'x', 'x')
+        Set-TestAnswers @('12', '7', 'x', 'x', 'x')
         InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Start-ForecastGuidedSetup -Root $Root -AsOf $AsOf | Should -BeFalse }
         InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root } { Test-ForecastWorkspaceConfigured -Root $Root | Should -BeFalse }
     }
@@ -345,6 +381,101 @@ Describe 'Guided setup' {
         Set-TestAnswers @('1', '0', '4', '3', '35', 'Auto', '')
         InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root } { Edit-ForecastPeriod -Root $Root }
         (Get-TestSettings -Root $script:Root).method.minimumRetained | Should -Be 3
+    }
+}
+
+Describe 'Read time estimates' {
+    It 'Ranks exports first, then live reads fastest first, with reports and rough times' {
+        # 124 subscriptions and a 4-month July lookback read 2026-07 through November.
+        $estimate = InModuleScope FinOpsForecast -Parameters @{ AsOf = $script:AsOf } {
+            Get-ForecastReadEstimate -SubscriptionCount 124 -LookbackMonths 4 -EarliestMonth '2026-07' -AsOf $AsOf -BillingCheck ([pscustomobject]@{ Accounts = @() })
+        }
+        @($estimate.Options.Key) | Should -Be @('Exports', 'Billing', 'Subscriptions')
+        $billing = $estimate.Options[1]
+        $billing.Reports | Should -Be 22
+        $billing.FirstRead | Should -Be '22 reports, about 20 minutes'
+        $billing.Available | Should -BeFalse
+        $billing.Status | Should -Be 'not available with this sign-in'
+        $each = $estimate.Options[2]
+        $each.Reports | Should -Be 620
+        $each.FirstRead | Should -Be '620 reports, about 6 hours'
+        $each.Later | Should -Be '124 to 248, about 1 to 2.5 hours'
+        $estimate.Recommendation | Should -Be 'More than 3 months? Use exports if they already cover these months. With a billing reader role, one set of reports would cover every subscription.'
+    }
+
+    It 'Recommends <Expected> when the billing account is <Case>' -ForEach @(
+        @{ Case = 'readable'; Lookback = 4; Check = [pscustomobject]@{ Accounts = @([pscustomobject]@{ Name = 'Synthetic MCA'; Agreement = 'MCA' }) }; Expected = '; if not, read at the billing account.' }
+        @{ Case = 'not checked'; Lookback = 4; Check = $null; Expected = '; if not, read at the billing account with a billing reader role.' }
+        @{ Case = 'readable, at the minimum lookback'; Lookback = 3; Check = [pscustomobject]@{ Accounts = @([pscustomobject]@{ Name = 'Synthetic MCA'; Agreement = 'MCA' }) }; Expected = '' }
+    ) {
+        $estimate = InModuleScope FinOpsForecast -Parameters @{ AsOf = $script:AsOf; Lookback = $Lookback; Check = $Check } {
+            Get-ForecastReadEstimate -SubscriptionCount 124 -LookbackMonths $Lookback -EarliestMonth '2026-07' -AsOf $AsOf -BillingCheck $Check
+        }
+        if ($Expected) { $estimate.Recommendation | Should -Be "More than 3 months? Use exports if they already cover these months$Expected" }
+        else { $estimate.Recommendation | Should -BeNullOrEmpty }
+    }
+
+    It 'Leaves the billing account out for a few subscriptions, and ranks each subscription first when that''s faster' {
+        $few = InModuleScope FinOpsForecast -Parameters @{ AsOf = $script:AsOf } { Get-ForecastReadEstimate -SubscriptionCount 2 -LookbackMonths 12 -EarliestMonth '2025-11' -AsOf $AsOf -BillingCheck $null }
+        @($few.Options.Key) | Should -Be @('Exports', 'Subscriptions')
+        # Five subscriptions: 65 monthly reports take less time than 61 weekly ones.
+        $five = InModuleScope FinOpsForecast -Parameters @{ AsOf = $script:AsOf } { Get-ForecastReadEstimate -SubscriptionCount 5 -LookbackMonths 12 -EarliestMonth '2025-11' -AsOf $AsOf -BillingCheck $null }
+        @($five.Options.Key) | Should -Be @('Exports', 'Subscriptions', 'Billing')
+        $five.Recommendation | Should -Be 'More than 3 months? Use exports if they already cover these months.'
+    }
+
+    It 'Rounds <Seconds> seconds to <Expected>' -ForEach @(
+        @{ Seconds = 20; UpTo = -1; Expected = 'under a minute' }
+        @{ Seconds = 3500; UpTo = -1; Expected = 'about 1 hour' }
+        @{ Seconds = 57600; UpTo = -1; Expected = 'about 16 hours' }
+        @{ Seconds = 4340; UpTo = 8680; Expected = 'about 1 to 2.5 hours' }
+        @{ Seconds = 1800; UpTo = 5400; Expected = 'about 30 minutes to 1.5 hours' }
+    ) {
+        InModuleScope FinOpsForecast -Parameters @{ Seconds = $Seconds; UpTo = $UpTo } { Format-ForecastDuration -Seconds $Seconds -UpToSeconds $UpTo } | Should -Be $Expected
+    }
+}
+
+Describe 'How it works on the review page' {
+    BeforeEach {
+        $script:Console.Clear()
+        Mock Read-FinOpsAnswer -ModuleName FinOpsForecast { if ($script:Answers.Count) { $script:Answers.Dequeue() } else { '' } }
+        Mock Write-FinOpsConsole -ModuleName FinOpsForecast { $script:Console.Add([string]$Object) }
+        Mock Clear-Host -ModuleName FinOpsForecast { }
+        Mock Get-ForecastCostDetailsBillingScopes -ModuleName FinOpsForecast { throw 'H should not ask Azure.' }
+        $script:Root = New-TestWorkspace
+        $script:Ids = @(New-TestSubscriptions -Count 5 | ForEach-Object Id)
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; Ids = $script:Ids } {
+            $settings = New-ForecastDefaultSettings
+            $settings.dataMode = 'Exports'
+            $settings.scope.subscriptionIds = $Ids
+            $settings.scope.label = 'sub-synth-a and 4 more subscriptions'
+            $settings.sources = @($Ids | ForEach-Object { [pscustomobject]@{ id = "live-$($_.Substring(0, 8))"; kind = 'CostDetails'; label = 'synthetic (live)'; scope = "/subscriptions/$_"; chunkDays = 31; fromMonth = 'Auto'; toMonth = ''; storageResourceId = ''; container = ''; prefix = ''; path = ''; agreement = 'Auto' } })
+            Save-ForecastStoredSettings -Root $Root -Settings $settings
+            $script:ForecastBillingCheck = $null
+        }
+    }
+
+    It 'Marks the read in use, and shows the last billing check without asking Azure' {
+        InModuleScope FinOpsForecast -Parameters @{ Ids = $script:Ids } { $script:ForecastBillingCheck = [pscustomobject]@{ Key = Get-ForecastBillingCheckKey -SubscriptionIds $Ids; Accounts = @() } }
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Show-ForecastHowItWorks -Root $Root -AsOf $AsOf }
+        $text = $script:Console -join "`n"
+        $text | Should -Match 'Live, each subscription\n \(in use\)'
+        $text | Should -Match 'Live, at the billing account\n: not available with this sign-in'
+        $text | Should -Match 'G, then 3'
+    }
+
+    It 'Says the billing account isn''t checked yet when guided setup hasn''t checked these subscriptions' {
+        InModuleScope FinOpsForecast { $script:ForecastBillingCheck = [pscustomobject]@{ Key = Get-ForecastBillingCheckKey -SubscriptionIds @('00000000-0000-4000-8000-000000000000'); Accounts = @() } }
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Show-ForecastHowItWorks -Root $Root -AsOf $AsOf }
+        ($script:Console -join "`n") | Should -Match 'Live, at the billing account\n: not checked yet'
+    }
+
+    It 'Opens from the review page with H' {
+        Mock Invoke-ForecastEvaluation -ModuleName FinOpsForecast { throw 'Synthetic evaluation failure.' }
+        Mock Show-ForecastHowItWorks -ModuleName FinOpsForecast { }
+        Set-TestAnswers @('H', 'Q')
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Show-ForecastSetupReview -Root $Root -AsOf $AsOf }
+        Should -Invoke Show-ForecastHowItWorks -ModuleName FinOpsForecast -Times 1 -Exactly
     }
 }
 

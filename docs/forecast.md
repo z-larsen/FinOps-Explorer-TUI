@@ -34,16 +34,16 @@ Without a workspace name, the forecast signs you in first, using the same tenant
 
 A new workspace goes straight into a few questions:
 
-1. **Where the history comes from**:
+1. **How many months of history**: 3 to 36. Twelve months can give a Ready forecast; fewer gives a Preliminary one. Live reads reach back 12 months, so choosing them with a longer history uses 12.
+2. **The fiscal year's first month.** If the fiscal year started before the lookback window, the history also reaches back to its first month, because those months are actuals in the year's total.
+3. **Where the history comes from.** A screen first sums up how the forecast is built and ranks the ways to read these months by how long they'd take; see [How long reading the history takes](#how-long-reading-the-history-takes). Then you choose:
    - **Live from Cost Management**, using your sign-in. No exports are needed; see [Cost Details](#read-cost-management-directly-cost-details).
    - **Exports**: find them for the selected subscriptions and the management groups and billing accounts above them, name a storage account, or point at a local copy.
    - **Monthly totals** you type in.
-2. **How many months of history**: 3 to 12 live, up to 36 from exports. Twelve months can give a Ready forecast; fewer gives a Preliminary one.
-3. **The fiscal year's first month.** If the fiscal year started before the lookback window, the history also reaches back to its first month, because those months are actuals in the year's total.
 
-It then saves the settings and offers to refresh right away. For live reads, it says how many reports the first refresh requests.
+It then saves the settings and offers to refresh right away. For live reads, it says how many reports the first refresh requests and roughly how long they'll take.
 
-For live reads of up to three subscriptions, each subscription gets one report per month. With more, guided setup looks for the one EA or MCA billing account that owns all of them and offers to read there, so one set of weekly reports covers every subscription. Reading at a billing account needs a billing reader role. If the subscriptions belong to more than one account, or this sign-in can't confirm the owner of each, each subscription is read separately.
+For live reads of up to three subscriptions, each subscription gets one report per month. With more, guided setup looks for the one EA or MCA billing account that owns all of them before it shows the time estimates, so they say whether that account is open to you. If it is and you read live, it offers to read there, so one set of weekly reports covers every subscription; the default is whichever the estimates say is faster. Reading at a billing account needs a billing reader role. If the subscriptions belong to more than one account, or this sign-in can't confirm the owner of each, each subscription is read separately.
 
 Live sources follow the forecast period: their first month is **AUTO**, so changing the lookback or fiscal year in **3 Period** changes what the next refresh reads.
 
@@ -52,6 +52,27 @@ Run it again any time with **G** on the review page. It replaces the source, sco
 To pick the workspace yourself, name it with `Start-FinOpsForecast -WorkspaceName contoso-fy27`. An empty named workspace also starts guided setup. Non-interactive runs and runs with `-ConfigPath` use the `default` workspace unless you name one.
 
 A workspace keeps settings, review decisions, cached export history, and saved forecasts under `FinOpsToolkit\Explorer\Forecast\<name>` in your local application data, readable only by you.
+
+## How long reading the history takes
+
+Most of a first refresh is spent waiting while Cost Management builds each live report, one at a time. The number of reports matters far more than your machine or network. Guided setup shows the ways to read ranked fastest first for your subscriptions and months, and **H** on the review page shows them again, marking the one the workspace uses.
+
+| Way to read | First read | Each later refresh | Needs |
+|---|---|---|---|
+| Exports | Usually minutes, depending on file size | Only new export files | Exports that already cover the months, and Storage Blob Data Reader or a local copy |
+| Live, at the billing account | About 5 weekly reports a month | 5 to 10 reports | An EA or MCA billing reader role on the one account that owns every subscription |
+| Live, each subscription | One report per subscription a month | 1 to 2 reports per subscription | Cost Management Reader on each subscription (EA or MCA only) |
+
+The estimates assume about 35 seconds for a subscription's monthly report, measured on a live tenant, and about a minute for a billing account's weekly report, which covers every subscription. They're rough: large subscriptions take longer, and throttling adds pauses. For example, 124 subscriptions with 4 months of history plus this month need 620 reports read one subscription at a time (about 6 hours), or 22 at the billing account (about 20 minutes). The billing account is only offered for more than three subscriptions; below that, reading each one is faster.
+
+With more than 3 months of history, the screen recommends exports if they already cover the months, then the fastest live read you can use. To make a first read faster:
+
+- Use exports the customer already has.
+- Ask for an EA or MCA billing reader role, so one set of reports covers every subscription.
+- Select only the subscriptions that matter for the forecast.
+- Choose fewer months of history. Three is the minimum, and gives a Preliminary forecast.
+
+Later refreshes keep every finished month. They read this month, and last month until it's final a few days after it ends. Leave the window open during a refresh. If a refresh fails partway, the months it read completely are kept and the next refresh carries on.
 
 ## The Setup & Review page
 
@@ -67,7 +88,7 @@ Everything happens on one page. Each line shows a status: **OK**, **CHECK** (a w
 | 6 Reconciliation | Each month's raw export total against what was included and excluded |
 | 7 Refresh | Refresh history; refresh now |
 
-Other keys: **R** refresh, **W** workloads, **F** forecast and save, **P** preview report, **I** manual inputs, **G** guided setup, **Q** quit.
+Other keys: **R** refresh, **W** workloads, **F** forecast and save, **P** preview report, **I** manual inputs, **G** guided setup, **H** how the forecast works and how long reading takes, **Q** quit.
 
 After guided setup, a typical first run is:
 
@@ -195,7 +216,7 @@ It refreshes, writes reports, and saves a vintage if the forecast is Ready. If i
 - For local copies, updated files must have updated modification times. An in-place change preserving both size and modification time can't be detected from the listing. Changing source settings or ingestion rules requires a refresh.
 - Reconciliation ignores differences under 0.000001, which come from decimal rounding of very long amounts.
 - A first refresh reads about 10 MB of uncompressed CSV a second, roughly 10,000 real cost rows. Thirteen months at a million rows a month takes about 20 to 25 minutes the first time; later refreshes only read new runs. Cost Details sources also wait for each report to be generated.
-- Cost Details sources haven't been run against a live tenant yet. The tests use a synthetic API that follows the documented contract; the first real run should start with a narrow month range.
+- Cost Details reads at subscription scope have run against a live tenant, which is where the 35-second estimate comes from. Billing-scope reads haven't been timed on a live tenant yet. The tests use a synthetic API that follows the documented contract.
 - Windows is the verified platform. The code is cross-platform, but Linux and macOS haven't been tested.
 
 ## Tests

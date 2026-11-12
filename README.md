@@ -414,10 +414,13 @@ prompt of `Start-FinOpsExplorer`. Scripted Explorer runs (`-NonInteractive`,
 `-Scans`, or `-DataSource`) skip that prompt.
 
 Guided setup signs you in, opens a workspace for the signed-in tenant, and asks
-three things: whether to read live from Cost Management, from exports, or from
-totals you type in; how many months of history (3 to 12 live, up to 36 from
-exports); and when the fiscal year starts. Then it refreshes. Fewer than 12
-months gives a Preliminary forecast that's reported but never saved.
+how many months of history to use (3 to 36; live reads reach back 12) and when
+the fiscal year starts. A screen then explains how the forecast is built and
+ranks the ways to read the history by how long they'd take, fastest first,
+before you choose exports, live reads from Cost Management, or totals you type
+in. Then it refreshes. Fewer than 12 months gives a Preliminary forecast that's
+reported but never saved. Press **H** on the review page to see that screen
+again.
 
 The forecast reads Azure data only; the one request it sends asks Cost
 Management to generate a temporary report, and it never creates exports,

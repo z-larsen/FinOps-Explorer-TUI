@@ -130,8 +130,8 @@ function Show-ForecastSetupReview {
         }
         Write-FinOpsConsole ''
         $inputsAction = if ($session -and $session.Settings.dataMode -eq 'Manual') { '  I Inputs' } else { '' }
-        Write-FinOpsConsole "  1-7 Open a section$inputsAction   W Workloads   R Refresh   F Forecast and save   P Preview report   G Guided setup   Q Quit" -ForegroundColor DarkGray
-        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid @('1', '2', '3', '4', '5', '6', '7', 'I', 'W', 'R', 'F', 'P', 'G', 'Q')
+        Write-FinOpsConsole "  1-7 Open a section$inputsAction   W Workloads   R Refresh   F Forecast and save   P Preview report   G Guided setup   H How it works   Q Quit" -ForegroundColor DarkGray
+        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid @('1', '2', '3', '4', '5', '6', '7', 'I', 'W', 'R', 'F', 'P', 'G', 'H', 'Q')
         if ($choice -eq '') { $emptyAnswers++; if ($emptyAnswers -ge 2) { return }; continue }
         $emptyAnswers = 0
         try {
@@ -149,6 +149,7 @@ function Show-ForecastSetupReview {
                 'F' { if ($session) { Invoke-ForecastConsolePublish -Session $session -OutputPath $OutputPath -SaveVintage } }
                 'P' { if ($session) { Invoke-ForecastConsolePublish -Session $session -OutputPath $OutputPath } }
                 'G' { $null = Start-ForecastGuidedSetup -Root $Root -AsOf $AsOf }
+                'H' { Show-ForecastHowItWorks -Root $Root -AsOf $AsOf }
                 'Q' { return }
             }
         }
