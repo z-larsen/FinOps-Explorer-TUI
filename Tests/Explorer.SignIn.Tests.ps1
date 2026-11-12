@@ -19,7 +19,8 @@ Describe 'Choosing a tenant by name' {
         foreach ($definition in $ast.FindAll({
                     param($node)
                     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                    $node.Name -in @('Get-FinOpsTenantChoice', 'Step-FinOpsTenantPicker', 'Select-FinOpsTenant', 'Connect-FinOpsAzAccount', 'Select-Subscription')
+                    $node.Name -in @('Get-FinOpsTenantChoice', 'Step-FinOpsTenantPicker', 'Select-FinOpsTenant', 'Connect-FinOpsAzAccount', 'Select-Subscription',
+                        'Get-FinOpsContextTenantName', 'Get-FinOpsSignInFailure', 'Test-FinOpsSignInExpired', 'Request-FinOpsTenantSignIn')
                 }, $true)) {
             . ([scriptblock]::Create($definition.Extent.Text))
         }
@@ -53,19 +54,42 @@ Describe 'Choosing a tenant by name' {
                 [pscustomobject]@{ Account = [pscustomobject]@{ Id = 'finops.synthetic@example.test' }; Tenant = [pscustomobject]@{ Id = $script:ContextTenant } }
             }
         }
-        function Get-AzTenant { [CmdletBinding()] param() $script:Tenants }
+        # Expired holds tenants whose saved sign-in Az can't use without the
+        # user. Like Az, listing tenants then returns only the saved tenant ID,
+        # and listing subscriptions returns nothing; both warn with the ID.
+        function Get-AzTenant {
+            [CmdletBinding()] param()
+            $saved = if ($script:SavedTenant) { $script:SavedTenant } else { $script:ContextTenant }
+            if ($script:Expired.Contains($saved)) {
+                Write-Warning "Unable to acquire token for tenant '$saved' with error 'User interaction is required.'"
+                return [pscustomobject]@{ TenantId = $saved }
+            }
+            $script:Tenants
+        }
         function Get-AzSubscription {
-            [CmdletBinding()] param([string]$TenantId)
+            [CmdletBinding()] param([string]$TenantId, [string]$SubscriptionId)
             $script:Calls.Add("Get-AzSubscription $TenantId")
-            @($script:Subscriptions | Where-Object TenantId -EQ $TenantId)
+            if ($script:Expired.Contains($TenantId)) {
+                Write-Warning "Unable to acquire token for tenant '$TenantId' with error 'User interaction is required.'"
+                return
+            }
+            @($script:Subscriptions | Where-Object { $_.TenantId -eq $TenantId -and (-not $SubscriptionId -or $_.Id -eq $SubscriptionId) })
         }
         function Connect-AzAccount {
             [CmdletBinding()] param([string]$TenantId)
             $script:Calls.Add("Connect-AzAccount $TenantId".TrimEnd())
-            if ($script:FailedSignIns -gt 0) { $script:FailedSignIns--; throw 'Synthetic sign-in was cancelled.' }
-            if (-not $TenantId) { $script:ContextTenant = $script:Ids.Contoso }
-            elseif (-not $script:SignInLandsElsewhere) { $script:ContextTenant = $TenantId }
+            $script:SignInWarningAction = [string]$PSBoundParameters['WarningAction']
+            if ($script:FailedSignIns -gt 0) {
+                $script:FailedSignIns--
+                throw $(if ($TenantId) { "Authentication failed against tenant $TenantId. Synthetic sign-in was cancelled." } else { 'Synthetic sign-in was cancelled.' })
+            }
+            $script:SavedTenant = $null
+            if (-not $TenantId) { $script:ContextTenant = $script:HomeTenant; return }
+            if ($script:SignInLandsElsewhere) { return }
+            $script:ContextTenant = $TenantId
+            [void]$script:Expired.Remove($TenantId)
         }
+        function Set-AzContext { [CmdletBinding()] param([string]$SubscriptionId, [string]$TenantId, [string]$Scope) $script:Calls.Add("Set-AzContext $SubscriptionId") }
         function Get-AzConfig { [CmdletBinding()] param([switch]$LoginExperienceV2) $script:Calls.Add('Get-AzConfig'); $script:LoginSetting }
         function Update-AzConfig { [CmdletBinding()] param([string]$LoginExperienceV2, [string]$Scope) $script:Calls.Add("Update-AzConfig $LoginExperienceV2 $Scope") }
         function Clear-AzConfig {
@@ -102,6 +126,10 @@ Describe 'Choosing a tenant by name' {
         $script:LoginSetting = [pscustomobject]@{ Value = 'On'; Scope = 'Default' }
         $script:FailedSignIns = 0
         $script:SignInLandsElsewhere = $false
+        $script:Expired = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $script:SavedTenant = $null
+        $script:HomeTenant = $script:Ids.Contoso
+        $script:SignInWarningAction = $null
         Set-Variable -Name NonInteractive -Value $false
     }
 
@@ -240,7 +268,8 @@ Describe 'Choosing a tenant by name' {
             $result = @(Select-Subscription)
 
             $result.Name | Should -Be @('contoso-prod', 'contoso-dev')
-            $script:Output | Should -Contain "  Sign-in to Fabrikam didn't finish: Synthetic sign-in was cancelled."
+            $script:Output | Should -Contain "  Sign-in to Fabrikam didn't finish: Authentication failed against Fabrikam."
+            ($script:Output -join "`n") | Should -Not -Match $script:GuidPattern
             @($script:Output | Where-Object { $_ -eq '  3 tenants available:' }).Count | Should -Be 2
             @($script:Calls | Where-Object { $_ -like 'Connect-AzAccount*' }).Count | Should -Be 1
             $script:Calls | Should -Contain 'Clear-AzConfig Process'
@@ -300,6 +329,7 @@ Describe 'Choosing a tenant by name' {
             Connect-FinOpsAzAccount
 
             $script:Calls | Should -Be $Expected
+            $script:SignInWarningAction | Should -Be 'SilentlyContinue' -Because 'Az''s warnings about other tenants and its own subscription choice don''t apply'
         }
 
         It 'Restores the setting when the sign-in fails' {
@@ -308,6 +338,109 @@ Describe 'Choosing a tenant by name' {
             { Connect-FinOpsAzAccount -TenantId $script:Ids.Fabrikam } | Should -Throw '*cancelled*'
 
             $script:Calls | Should -Be @('Get-AzConfig', 'Update-AzConfig Off Process', "Connect-AzAccount $($script:Ids.Fabrikam)", 'Clear-AzConfig Process')
+        }
+
+        It 'Names tenants in sign-in errors and keeps only the first sentence' {
+            $message = "Authentication failed against tenant $($script:Ids.Fabrikam). User interaction is required. Rerun 'Connect-AzAccount' with '-TenantId $($script:Ids.Fabrikam)'."
+            $record = [Management.Automation.ErrorRecord]::new([Exception]::new($message), 'SyntheticSignIn', 'AuthenticationError', $null)
+
+            Get-FinOpsSignInFailure -ErrorRecord $record -Choices @([pscustomobject]@{ TenantId = $script:Ids.Fabrikam; Label = 'Fabrikam $0 Ltd' }) | Should -Be 'Authentication failed against Fabrikam $0 Ltd.'
+            Get-FinOpsSignInFailure -ErrorRecord $record -Choices @([pscustomobject]@{ TenantId = $script:Ids.Fabrikam.ToUpperInvariant(); Label = '' }) | Should -Be 'Authentication failed against that tenant.'
+            Get-FinOpsSignInFailure -ErrorRecord ([Management.Automation.ErrorRecord]::new([Exception]::new(''), 'Empty', 'NotSpecified', $null)) | Should -Be 'Azure gave no reason.'
+        }
+    }
+
+    Context 'Expired sign-ins' {
+        It 'Signs in to the last tenant again when its saved sign-in can''t list tenants' {
+            [void]$script:Expired.Add($script:Ids.Contoso)
+            $script:Answers.Enqueue('')
+            $script:Answers.Enqueue('A')
+
+            $result = @(Select-Subscription)
+
+            $result.Name | Should -Be @('contoso-prod', 'contoso-dev')
+            $script:Calls | Should -Be @('Get-AzConfig', 'Update-AzConfig Off Process', "Connect-AzAccount $($script:Ids.Contoso)", 'Clear-AzConfig Process', "Get-AzSubscription $($script:Ids.Contoso)")
+            $script:Output | Should -Contain '  Your Azure sign-in has expired or needs MFA again. Sign in when prompted.'
+            $script:Output | Should -Contain '    [1] Contoso (current)'
+            $script:Output | Should -Not -Contain '  Tenant: Unnamed tenant'
+            ($script:Output -join "`n") | Should -Not -Match $script:GuidPattern
+        }
+
+        It 'Offers a fresh sign-in when the last tenant''s sign-in can''t be renewed, and you answer <Answer>' -ForEach @(
+            @{ Answer = 'Y'; Expected = @('northwind-prod') }
+            @{ Answer = 'N'; Expected = @() }
+        ) {
+            [void]$script:Expired.Add($script:Ids.Contoso)
+            $script:FailedSignIns = 1
+            $script:HomeTenant = $script:Ids.Northwind
+            $script:Answers.Enqueue($Answer)
+            $script:Answers.Enqueue('')
+
+            $result = @(Select-Subscription | Where-Object { $_ })
+
+            ($result.Name -join ',') | Should -Be ($Expected -join ',')
+            $script:Output | Should -Contain "  Sign-in didn't finish: Authentication failed against that tenant."
+            ($script:Output -join "`n") | Should -Not -Match $script:GuidPattern
+            if ($Answer -eq 'Y') {
+                $script:Calls | Should -Contain 'Connect-AzAccount'
+                $script:Output | Should -Contain '    [3] Northwind Traders (current)'
+            }
+            else {
+                @($script:Calls | Where-Object { $_ -like 'Connect-AzAccount*' }).Count | Should -Be 1
+                @($script:Calls | Where-Object { $_ -like 'Get-AzSubscription*' }) | Should -BeNullOrEmpty
+            }
+        }
+
+        It 'Signs in to the chosen tenant again when its subscriptions can''t be read' {
+            [void]$script:Expired.Add($script:Ids.Contoso)
+            $script:SavedTenant = $script:Ids.Northwind
+            $script:Answers.Enqueue('')
+            $script:Answers.Enqueue('A')
+
+            $result = @(Select-Subscription)
+
+            $result.Name | Should -Be @('contoso-prod', 'contoso-dev')
+            $script:Calls | Should -Be @("Get-AzSubscription $($script:Ids.Contoso)", 'Get-AzConfig', 'Update-AzConfig Off Process', "Connect-AzAccount $($script:Ids.Contoso)", 'Clear-AzConfig Process', "Get-AzSubscription $($script:Ids.Contoso)")
+            $script:Output | Should -Contain '  Your Azure sign-in to Contoso has expired or needs MFA again. Sign in when prompted.'
+            $script:Output | Should -Not -Contain '  No enabled subscriptions were found in Contoso. Your account needs Reader access to at least one subscription there.'
+        }
+
+        It 'Explains when a tenant has no enabled subscriptions' {
+            $script:Subscriptions = @($script:Subscriptions | Where-Object TenantId -NE $script:Ids.Contoso)
+            $script:Answers.Enqueue('')
+
+            Select-Subscription | Should -BeNullOrEmpty
+
+            $script:Output | Should -Contain '  No enabled subscriptions were found in Contoso. Your account needs Reader access to at least one subscription there.'
+            @($script:Calls | Where-Object { $_ -like 'Connect-AzAccount*' }) | Should -BeNullOrEmpty
+        }
+
+        It 'Stops unattended runs with the command that renews the sign-in' {
+            Set-Variable -Name NonInteractive -Value $true
+            [void]$script:Expired.Add($script:Ids.Contoso)
+            $script:SavedTenant = $script:Ids.Northwind
+
+            { Select-Subscription } | Should -Throw "*Run Connect-AzAccount -TenantId $($script:Ids.Contoso)*"
+
+            @($script:Calls | Where-Object { $_ -like 'Connect-AzAccount*' }) | Should -BeNullOrEmpty
+        }
+
+        It 'Renews the sign-in for an explicit subscription in <Mode> runs without widening the scope' -ForEach @(
+            @{ Mode = 'interactive'; Unattended = $false }
+            @{ Mode = 'unattended'; Unattended = $true }
+        ) {
+            Set-Variable -Name NonInteractive -Value $Unattended
+            [void]$script:Expired.Add($script:Ids.Contoso)
+
+            if ($Unattended) {
+                { Select-Subscription -PreselectedId '11111111-1111-4111-8111-111111111111' } | Should -Throw '*Run Connect-AzAccount -TenantId*'
+                @($script:Calls | Where-Object { $_ -like 'Connect-AzAccount*' -or $_ -like 'Set-AzContext*' }) | Should -BeNullOrEmpty
+                return
+            }
+            $result = @(Select-Subscription -PreselectedId '11111111-1111-4111-8111-111111111111')
+
+            $result.Name | Should -Be 'contoso-prod'
+            $script:Calls | Should -Be @("Get-AzSubscription $($script:Ids.Contoso)", 'Get-AzConfig', 'Update-AzConfig Off Process', "Connect-AzAccount $($script:Ids.Contoso)", 'Clear-AzConfig Process', "Get-AzSubscription $($script:Ids.Contoso)", 'Set-AzContext 11111111-1111-4111-8111-111111111111')
         }
     }
 }

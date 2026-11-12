@@ -810,10 +810,11 @@ function Invoke-FinOpsMultitool {
     # Explorer chooses the tenant and subscriptions itself, so Az's own
     # subscription list, which spans every tenant, is turned off for this
     # PowerShell session while signing in, then restored. Saved Az settings
-    # aren't changed.
+    # aren't changed. Az's warnings about other tenants that need MFA, and
+    # about the subscription it picked, don't apply, so they aren't shown.
     function Connect-FinOpsAzAccount {
         param([string]$TenantId)
-        $parameters = @{ ErrorAction = 'Stop' }
+        $parameters = @{ ErrorAction = 'Stop'; WarningAction = 'SilentlyContinue' }
         if ($TenantId) { $parameters.TenantId = $TenantId }
         $restore = $null
         if (Get-Command Update-AzConfig -ParameterName LoginExperienceV2 -ErrorAction SilentlyContinue) {
@@ -832,6 +833,66 @@ function Invoke-FinOpsMultitool {
         }
     }
 
+    # The tenant's name from an Azure context, when the saved sign-in recorded
+    # one; never its ID.
+    function Get-FinOpsContextTenantName {
+        param($Context)
+        $name = ([string]$Context.Tenant.Name -replace '[\p{Cc}\p{Cf}]', '').Trim()
+        if ($name -eq [string]$Context.Tenant.Id) { return '' }
+        return $name
+    }
+
+    # The first sentence of a sign-in error. Azure names tenants by ID, so each
+    # known tenant is named instead, or called "that tenant" without a name.
+    function Get-FinOpsSignInFailure {
+        param([Parameter(Mandatory)]$ErrorRecord, [object[]]$Choices)
+        $lines = @(([string]$ErrorRecord.Exception.Message) -split '\r?\n' | Where-Object { $_.Trim() })
+        $reason = if ($lines.Count) { $lines[0].Trim() } else { 'Azure gave no reason.' }
+        $end = $reason.IndexOf('. ')
+        if ($end -gt 0) { $reason = $reason.Substring(0, $end + 1) }
+        foreach ($choice in @($Choices | Where-Object { $_.TenantId })) {
+            $name = if ($choice.Label) { [string]$choice.Label } else { 'that tenant' }
+            $pattern = "(?:\btenant\s+)?'?$([regex]::Escape([string]$choice.TenantId))'?"
+            $reason = [regex]::Replace($reason, $pattern, $name.Replace('$', '$$'), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+        return $reason
+    }
+
+    # Az returns nothing, with a warning that names the tenant, when the saved
+    # sign-in for that tenant can't be used without you: it expired, or the
+    # tenant needs MFA again.
+    function Test-FinOpsSignInExpired {
+        param([object[]]$Warnings, [Parameter(Mandatory)][string]$TenantId)
+        return @($Warnings | Where-Object { ([string]$_).IndexOf($TenantId, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -gt 0
+    }
+
+    # Signs in to a tenant again when its saved sign-in can't be used without
+    # you. Returns the new context, or $null when the sign-in didn't finish or
+    # ended in another tenant. Unattended runs can't prompt, so they stop with
+    # the command that renews the sign-in.
+    function Request-FinOpsTenantSignIn {
+        param([Parameter(Mandatory)][string]$TenantId, [string]$Label, [object[]]$Choices)
+        if ($NonInteractive) {
+            throw "The saved Azure sign-in for tenant '$TenantId' has expired or needs MFA again. Run Connect-AzAccount -TenantId $TenantId, then start the scan again."
+        }
+        $where = if ($Label) { " to $Label" } else { '' }
+        Write-FinOpsConsole "  Your Azure sign-in$where has expired or needs MFA again. Sign in when prompted." -ForegroundColor Yellow
+        $previous = Get-AzContext -ErrorAction SilentlyContinue
+        try { Connect-FinOpsAzAccount -TenantId $TenantId }
+        catch {
+            $known = @($Choices) + [pscustomobject]@{ TenantId = $TenantId; Label = $Label }
+            Write-FinOpsConsole "  Sign-in$where didn't finish: $(Get-FinOpsSignInFailure -ErrorRecord $_ -Choices $known)" -ForegroundColor Yellow
+            return $null
+        }
+        $context = Get-AzContext -ErrorAction SilentlyContinue
+        if (-not $context -or $context.Tenant.Id -ne $TenantId) {
+            Write-FinOpsConsole "  The sign-in didn't end in $(if ($Label) { $Label } else { 'that tenant' }), so nothing was read." -ForegroundColor Yellow
+            return $null
+        }
+        if ($context.Account.Id -ne $previous.Account.Id) { Write-FinOpsConsole "  Signed in as: $($context.Account.Id)" -ForegroundColor Green }
+        return $context
+    }
+
     # =====================================================================
     #  SUBSCRIPTION PICKER
     # =====================================================================
@@ -845,7 +906,7 @@ function Invoke-FinOpsMultitool {
             Write-FinOpsConsole "  Not connected. Launching browser login..." -ForegroundColor Yellow
             try { Connect-FinOpsAzAccount }
             catch {
-                Write-FinOpsConsole "  Sign-in didn't finish: $(@($_.Exception.Message -split '\r?\n')[0])" -ForegroundColor Yellow
+                Write-FinOpsConsole "  Sign-in didn't finish: $(Get-FinOpsSignInFailure -ErrorRecord $_)" -ForegroundColor Yellow
                 return $null
             }
             $ctx = Get-AzContext
@@ -860,7 +921,15 @@ function Invoke-FinOpsMultitool {
         # An explicit subscription must resolve in the current tenant. Never
         # search other tenants or widen the scope when that lookup fails.
         if ($PreselectedId) {
-            $sub = Get-AzSubscription -SubscriptionId $PreselectedId -TenantId $ctx.Tenant.Id -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+            $lookupWarnings = @()
+            $sub = Get-AzSubscription -SubscriptionId $PreselectedId -TenantId $ctx.Tenant.Id -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -WarningVariable lookupWarnings
+            if (-not $sub -and (Test-FinOpsSignInExpired -Warnings $lookupWarnings -TenantId $ctx.Tenant.Id)) {
+                # Signing in to the same tenant again never widens the scope.
+                $renewed = Request-FinOpsTenantSignIn -TenantId $ctx.Tenant.Id -Label (Get-FinOpsContextTenantName $ctx)
+                if (-not $renewed) { return $null }
+                $ctx = $renewed
+                $sub = Get-AzSubscription -SubscriptionId $PreselectedId -TenantId $ctx.Tenant.Id -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+            }
             if (-not $sub) {
                 throw "Subscription '$PreselectedId' could not be resolved in the current tenant '$($ctx.Tenant.Id)'. Refusing to widen the scan to all subscriptions. Sign in to the intended tenant before trying again."
             }
@@ -870,8 +939,8 @@ function Invoke-FinOpsMultitool {
             $null = Set-AzContext -SubscriptionId $sub.Id -TenantId $ctx.Tenant.Id -Scope Process -ErrorAction Stop -WarningAction SilentlyContinue
             Write-FinOpsConsole "  Using subscription: $($sub.Name)" -ForegroundColor Green
             # The tenant is shown by name only, when the context has one.
-            $tenantName = ([string]$ctx.Tenant.Name -replace '[\p{Cc}\p{Cf}]', '').Trim()
-            if ($tenantName -and $tenantName -ne $ctx.Tenant.Id) { Write-FinOpsConsole "  Tenant: $tenantName" -ForegroundColor Green }
+            $tenantName = Get-FinOpsContextTenantName $ctx
+            if ($tenantName) { Write-FinOpsConsole "  Tenant: $tenantName" -ForegroundColor Green }
             Write-FinOpsConsole ""
             return @($sub)
         }
@@ -881,6 +950,32 @@ function Invoke-FinOpsMultitool {
         # though only the selected tenant is used; that tenant is verified below.
         $tenants = @(Get-AzTenant -ErrorAction SilentlyContinue -WarningAction SilentlyContinue)
         $choices = @(Get-FinOpsTenantChoice -Tenants $tenants -CurrentTenantId $ctx.Tenant.Id)
+        if (-not $NonInteractive -and @($choices | Where-Object { $_.Name -or $_.Domain }).Count -eq 0) {
+            # When the saved sign-in can't be used without you, Az lists only the
+            # tenant IDs it saved, without names. Sign in to that tenant again,
+            # or start over, so the tenants can be listed by name.
+            $renewed = Request-FinOpsTenantSignIn -TenantId $ctx.Tenant.Id -Label (Get-FinOpsContextTenantName $ctx)
+            if (-not $renewed) {
+                $answer = Read-FinOpsAnswer '  Sign in again and choose a tenant from the list? (Y/N): '
+                if ($answer -notmatch '^(?i)y(es)?$') { return $null }
+                Write-FinOpsConsole "  Signing in. With many tenants, this can take a minute..." -ForegroundColor Yellow
+                try { Connect-FinOpsAzAccount }
+                catch {
+                    Write-FinOpsConsole "  Sign-in didn't finish: $(Get-FinOpsSignInFailure -ErrorRecord $_)" -ForegroundColor Yellow
+                    return $null
+                }
+                $renewed = Get-AzContext -ErrorAction SilentlyContinue
+                if (-not $renewed -or [string]::IsNullOrWhiteSpace($renewed.Tenant.Id)) {
+                    Write-FinOpsConsole "  The sign-in couldn't be verified, so no subscriptions were listed." -ForegroundColor Yellow
+                    return $null
+                }
+                Write-FinOpsConsole "  Signed in as: $($renewed.Account.Id)" -ForegroundColor Green
+            }
+            $ctx = $renewed
+            Write-FinOpsConsole ""
+            $tenants = @(Get-AzTenant -ErrorAction SilentlyContinue -WarningAction SilentlyContinue)
+            $choices = @(Get-FinOpsTenantChoice -Tenants $tenants -CurrentTenantId $ctx.Tenant.Id)
+        }
         $currentChoice = @($choices | Where-Object Current)[0]
         $tenantLabel = if ($currentChoice) { $currentChoice.Label } else { 'the signed-in tenant' }
         if ($choices.Count -gt 1 -and $NonInteractive) {
@@ -899,7 +994,7 @@ function Invoke-FinOpsMultitool {
                 Write-FinOpsConsole "  Signing in to $($selected.Label)..." -ForegroundColor Yellow
                 try { Connect-FinOpsAzAccount -TenantId $selected.TenantId }
                 catch {
-                    Write-FinOpsConsole "  Sign-in to $($selected.Label) didn't finish: $(@($_.Exception.Message -split '\r?\n')[0])" -ForegroundColor Yellow
+                    Write-FinOpsConsole "  Sign-in to $($selected.Label) didn't finish: $(Get-FinOpsSignInFailure -ErrorRecord $_ -Choices $choices)" -ForegroundColor Yellow
                     if ($attempt -eq 3) { return $null }
                     Write-FinOpsConsole ""
                     continue
@@ -930,9 +1025,22 @@ function Invoke-FinOpsMultitool {
         if ([string]::IsNullOrWhiteSpace($effectiveTenantId) -or $effectiveTenantId -ne $ctx.Tenant.Id) {
             throw 'The selected tenant changed or could not be verified. No subscriptions were enumerated.'
         }
-        $allSubs = @(Get-AzSubscription -TenantId $effectiveTenantId -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Enabled' })
+        $listWarnings = @()
+        $listed = @(Get-AzSubscription -TenantId $effectiveTenantId -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -WarningVariable listWarnings)
+        if ($listed.Count -eq 0 -and (Test-FinOpsSignInExpired -Warnings $listWarnings -TenantId $effectiveTenantId)) {
+            $named = @($choices | Where-Object { $_.TenantId -eq $effectiveTenantId -and ($_.Name -or $_.Domain) })[0]
+            $renewed = Request-FinOpsTenantSignIn -TenantId $effectiveTenantId -Label $(if ($named) { $named.Label } else { '' }) -Choices $choices
+            if (-not $renewed) { return $null }
+            $ctx = $renewed
+            $listed = @(Get-AzSubscription -TenantId $effectiveTenantId -ErrorAction SilentlyContinue -WarningAction SilentlyContinue)
+        }
+        $allSubs = @($listed | Where-Object { $_.State -eq 'Enabled' })
         if ($allSubs.Count -eq 0) {
-            Write-Error "No enabled subscriptions found in $tenantLabel."
+            if ($NonInteractive) {
+                Write-Error "No enabled subscriptions found in $tenantLabel."
+                return $null
+            }
+            Write-FinOpsConsole "  No enabled subscriptions were found in $tenantLabel. Your account needs Reader access to at least one subscription there." -ForegroundColor Yellow
             return $null
         }
         if ($allSubs.Count -eq 1) {
