@@ -6,7 +6,7 @@
 param()
 BeforeAll {
     . (Join-Path $PSScriptRoot 'Forecast.TestHelpers.ps1')
-    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-05T12:00:00', [DateTimeKind]::Utc)
+    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-07T12:00:00', [DateTimeKind]::Utc)
     $script:Window = Get-TestMonthKeys -Last '2026-10'
 
     function New-RateSeries {
@@ -79,7 +79,7 @@ Describe 'Forecast engine' {
             @($reviewed.Comparisons.Items | Where-Object Status -EQ 'Undefined')[0].Review.Decision | Should -Be 'Exclude'
         }
 
-        It 'Flags a sustained jump and suggests a step change that keeps genuine growth' {
+        It 'Flags a sustained jump, suggests a step change, and leaves it out of growth unless retained' {
             $rates = [decimal[]](1000, 1010, 1020, 1030, 1040, 1600, 1616, 1632, 1648, 1664, 1680, 1696)
             $dataset = New-TestDataset -Values (New-RateSeries $rates)
             $model = Invoke-TestModel -Dataset $dataset -Settings (New-TestSettings)
@@ -89,9 +89,30 @@ Describe 'Forecast engine' {
             $flagged[0].Suggestion | Should -Be 'StepChange'
             $flagged[0].Retained | Should -BeFalse
 
-            $reviewed = Invoke-TestModel -Dataset $dataset -Settings (New-TestSettings) -Reviews (New-ReviewRecord $flagged[0].Review 'StepChange')
-            @($reviewed.Comparisons.Items | Where-Object Flagged)[0].Retained | Should -BeTrue
-            $reviewed.Growth.Retained | Should -Be 11
+            # A step change is a one-time move to a new level that the baseline already reflects.
+            $stepped = Invoke-TestModel -Dataset $dataset -Settings (New-TestSettings) -Reviews (New-ReviewRecord $flagged[0].Review 'StepChange')
+            @($stepped.Comparisons.Items | Where-Object Flagged)[0].Retained | Should -BeFalse
+            @($stepped.Comparisons.Items | Where-Object Flagged)[0].Reason | Should -Match 'left out of growth'
+            $stepped.Growth.Retained | Should -Be 10
+            $kept = Invoke-TestModel -Dataset $dataset -Settings (New-TestSettings) -Reviews (New-ReviewRecord $flagged[0].Review 'Retain')
+            @($kept.Comparisons.Items | Where-Object Flagged)[0].Retained | Should -BeTrue
+            $kept.Growth.Retained | Should -Be 11
+        }
+
+        It 'Uses the lowest to highest change while the lookback is under 12 months, and P25 to P75 from 12' {
+            $comparisons = [pscustomobject]@{ Items = @(0.01, 0.04, 0.02 | ForEach-Object { [pscustomobject]@{ Retained = $true; Change = [decimal]$_ } }) }
+            $short = New-TestSettings
+            $short.period.lookbackMonths = 4
+            InModuleScope FinOpsForecast -Parameters @{ Comparisons = $comparisons; Short = $short; Full = (New-TestSettings) } {
+                $growth = Get-ForecastGrowth -Comparisons $Comparisons -Settings $Short
+                $growth.RangeMethod | Should -Be 'LowestToHighest'
+                $growth.Central | Should -Be 0.02
+                @($growth.Low, $growth.High) | Should -Be @(0.01, 0.04)
+                # Linear interpolation between ranks, like Excel PERCENTILE.INC.
+                $growth = Get-ForecastGrowth -Comparisons $Comparisons -Settings $Full
+                $growth.RangeMethod | Should -Be 'Percentile'
+                @($growth.Low, $growth.High) | Should -Be @(0.015, 0.03)
+            }
         }
 
         It 'Suggests excluding a one-month spike and keeps the month in actuals' {

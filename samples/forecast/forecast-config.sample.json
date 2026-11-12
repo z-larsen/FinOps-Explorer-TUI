@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "dataMode": "Exports",
   "scope": {
     "kind": "Subscriptions",
@@ -14,7 +14,7 @@
     "fiscalYearStartMonth": 7,
     "fiscalYearOffset": 0,
     "lookbackMonths": 12,
-    "graceDays": 3,
+    "graceDays": 5,
     "staleAfterDays": 35,
     "windowEnd": "Auto"
   },

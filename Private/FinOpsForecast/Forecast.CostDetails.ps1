@@ -144,7 +144,7 @@ function Get-ForecastCostDetailsRuns {
 function Test-ForecastCostDetailsFinal {
     # A Complete whole-month read submitted at least the grace period after
     # the month closed. Matches the Final rule in Select-ForecastRuns.
-    param([AllowNull()]$Cached, [Parameter(Mandatory)][string]$Month, [Parameter(Mandatory)][string]$ProfileHash, [int]$GraceDays = 3)
+    param([AllowNull()]$Cached, [Parameter(Mandatory)][string]$Month, [Parameter(Mandatory)][string]$ProfileHash, [int]$GraceDays = $script:ForecastDefaultGraceDays)
     if (-not $Cached -or [string]$Cached.Status -ne 'Complete' -or [string]$Cached.ProfileHash -ne $ProfileHash) { return $false }
     $submitted = ConvertFrom-ForecastDate -Value $Cached.Submitted
     $cachedStart = ConvertFrom-ForecastDate -Value $Cached.Start
@@ -162,7 +162,7 @@ function Test-ForecastCostDetailsReuse {
         [AllowNull()]$Cached,
         [Parameter(Mandatory)]$Run,
         [Parameter(Mandatory)][string]$ProfileHash,
-        [int]$GraceDays = 3,
+        [int]$GraceDays = $script:ForecastDefaultGraceDays,
         [Parameter(Mandatory)][datetime]$Now
     )
     if (Test-ForecastCostDetailsFinal -Cached $Cached -Month ([string]@($Run.Months)[0]) -ProfileHash $ProfileHash -GraceDays $GraceDays) { return $true }
@@ -189,7 +189,7 @@ function Get-ForecastCostDetailsRetainedKeys {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Runs,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Cached,
         [Parameter(Mandatory)][string]$ProfileHash,
-        [int]$GraceDays = 3
+        [int]$GraceDays = $script:ForecastDefaultGraceDays
     )
     $scope = Get-ForecastCostDetailsScope -Scope ([string]$Source.scope)
     $planned = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)

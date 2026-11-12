@@ -6,7 +6,7 @@
 param()
 BeforeAll {
     . (Join-Path $PSScriptRoot 'Forecast.TestHelpers.ps1')
-    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-05T12:00:00', [DateTimeKind]::Utc)
+    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-07T12:00:00', [DateTimeKind]::Utc)
 
     function New-TestRoot { $path = Join-Path $TestDrive ([guid]::NewGuid().ToString('N')); [void][IO.Directory]::CreateDirectory($path); return $path }
 

@@ -66,7 +66,10 @@ function Get-ForecastDisclosure {
     $lines.Add('')
     $lines.Add('GROWTH AND SENSITIVITY')
     $lines.Add("- Central growth: median of retained changes = $(Format-ForecastPercent $growth.Central 2) a month.")
-    $lines.Add("- Sensitivity range: percentile $(Format-ForecastDecimal $growth.LowPercentile) to $(Format-ForecastDecimal $growth.HighPercentile) of retained changes = $(Format-ForecastPercent $growth.Low 2) to $(Format-ForecastPercent $growth.High 2) a month.")
+    if ($growth.RangeMethod -eq 'LowestToHighest') {
+        $lines.Add("- Sensitivity range: lowest to highest retained change = $(Format-ForecastPercent $growth.Low 2) to $(Format-ForecastPercent $growth.High 2) a month. With fewer than $($script:ForecastReadyMonths) months, percentiles of so few changes would be mostly interpolation, so the full observed range is used; P$($Settings.method.lowPercentile) to P$($Settings.method.highPercentile) applies from $($script:ForecastReadyMonths) months.")
+    }
+    else { $lines.Add("- Sensitivity range: percentile $(Format-ForecastDecimal $growth.LowPercentile) to $(Format-ForecastDecimal $growth.HighPercentile) of retained changes (linear interpolation, like Excel PERCENTILE.INC) = $(Format-ForecastPercent $growth.Low 2) to $(Format-ForecastPercent $growth.High 2) a month.") }
     $lines.Add('- This range reflects historical month-to-month variability. It is a sensitivity range, not a calibrated confidence interval.')
     $lines.Add("- Baseline: $(Format-ForecastAmount $Model.Baseline.Value $currency) a 30-day month ($($Model.Baseline.Method)). $($Model.Baseline.Detail)")
     $lines.Add('- Month j forecast = baseline x (1 + growth)^h x days(j) / 30, where h counts months after the window''s last month.')

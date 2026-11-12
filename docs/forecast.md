@@ -102,7 +102,7 @@ To set things up by hand instead, use **1 Source**: press **D** to discover expo
 
 With 3 to 11 months of history, the forecast runs the same method on the months you have and marks the result **Preliminary**. The status line shows it in yellow, every report says so, and the method disclosure explains it. A Preliminary forecast can't be saved as a vintage; use **P** for a preview report.
 
-Treat it as an early indication, not a number to commit to. N months give N − 1 month-to-month changes, so 3 months estimate growth from just 2 changes, and the range reflects only those. The minimum number of retained comparisons scales with the history, keeping the 8-of-11 share of a 12-month lookback. Raise the lookback to 12 in **3 Period** once enough months exist, and the same workspace can become Ready. A live source with its first month set to **AUTO** reads the extra months on the next refresh.
+Treat it as an early indication, not a number to commit to. N months give N − 1 month-to-month changes, so 3 months estimate growth from just 2 changes, and the range reflects only those. Until the lookback reaches 12 months, the low-to-high range runs from the lowest to the highest retained change, because percentiles of so few changes would be mostly interpolation: changes of 2% and 4% would give a P25 to P75 of 2.5% to 3.5%, narrower than what was seen. The minimum number of retained comparisons scales with the history, keeping the 8-of-11 share of a 12-month lookback. Raise the lookback to 12 in **3 Period** once enough months exist, and the same workspace can become Ready. A live source with its first month set to **AUTO** reads the extra months on the next refresh.
 
 A short lookback doesn't shorten the fiscal year. Months of the fiscal year before the lookback window still count as actuals in the total, so they need data too. Until they have it, the **Fiscal-year actuals before the lookback** check fails, rather than counting them as zero.
 
@@ -138,7 +138,7 @@ confirmed once. No currency conversion is performed.
 
 | Exception | Your choice |
 |---|---|
-| Anomalous month-to-month change | Retain, Exclude from growth, or Step change (a new level that held). Check what happened first; actual charges always stay in actuals. A drop back to the trend right after a spike is suggested as Exclude, not Step change. |
+| Anomalous month-to-month change | **Retain** counts it as growth. **Exclude** leaves it out of growth. **Step change** also leaves it out, and records that the new level is real: the baseline already starts from it. New reservations or savings plans are a common step change: covered usage shows as zero in actual cost, so usage drops while the purchase posts as a separate charge that isn't grown. Check what happened first; actual charges always stay in actuals. A drop back to the trend right after a spike is suggested as Exclude, not Step change. |
 | Undefined change (previous month was zero or negative) | Acknowledge; it's left out of growth estimation. |
 | Anomalous latest month | Baseline from the latest month, the median of the last three, or a manual value with a reason. |
 | Unclassified publisher | Treat rows from non-Microsoft publishers as Marketplace or Microsoft. EA exports label every row `Azure`, so this comes up for EA. The decision covers the publisher names it lists; new rows from those publishers keep it, and a new publisher reopens it. |
@@ -149,7 +149,7 @@ confirmed once. No currency conversion is performed.
 
 ## Scheduled items
 
-Purchases and refunds aren't grown with the run rate, so future commitments come only from scheduled items. Each has a unique ID, a start month, and a recurrence (one-time, monthly, or annual). It also has a treatment:
+Purchases and refunds aren't grown with the run rate, so future commitments come only from scheduled items. In actual cost, a reservation or savings plan paid up front shows once, in the month it's bought; one paid monthly shows the same charge every month on the purchase anniversary. To list the monthly ones, filter Cost analysis to **Charge type** Purchase and **Frequency** Recurring, then add each as a monthly scheduled item. Each scheduled item has a unique ID, a start month, and a recurrence (one-time, monthly, or annual). It also has a treatment:
 
 - **Additive**: adds the amount.
 - **AlreadyInBaseline**: adds nothing, because the run rate already includes it.
@@ -194,8 +194,8 @@ It refreshes, writes reports, and saves a vintage if the forecast is Ready. If i
 
 ## Reading the numbers
 
-- **Central estimate** uses the median month-over-month change in run rate.
-- **Sensitivity range** uses the 25th to 75th percentile of historical changes. It shows how much the history varied. It is **not** a confidence interval.
+- **Central estimate** uses the median month-over-month change in run rate. With an even number of changes, that's the average of the middle two.
+- **Sensitivity range** uses the 25th to 75th percentile of historical changes, interpolated linearly between them like Excel's PERCENTILE.INC. Under 12 months of history it uses the lowest to the highest change instead. It shows how much the history varied. It is **not** a confidence interval.
 - **Custom percentiles** must satisfy `0 <= low < 50 < high <= 100`, so the range brackets the central median. This is checked for JSON settings as well as console edits.
 - **Fiscal-year totals** add completed months, this month's actuals so far plus the rest of the month, the remaining forecast months, and scheduled items. Low and high each follow one growth path for the whole year.
 - **Month-to-date coverage** comes from the verified run range, bounded by when the run was submitted. Days with no charges aren't forecast again. If selected runs have different coverage cutoffs, Ready is blocked until a refresh brings them into line.
@@ -207,7 +207,7 @@ It refreshes, writes reports, and saves a vintage if the forecast is Ready. If i
 
 - Learn doesn't say whether refund rows are negative; signs are kept as exported and positive refunds are flagged.
 - `RoundingAdjustment` rows only appear at billing scope after an invoice, so subscription-scoped months can differ slightly from invoices.
-- Cost data can change for up to 72 hours after a month ends. A month counts as final only when a whole-month run was submitted after the grace period (3 days by default).
+- Azure closes a billing period up to 72 hours after it ends, but usage charges can still change until the fifth day, and charges are final once the invoice is issued ([Understand Cost Management data](https://learn.microsoft.com/azure/cost-management-billing/costs/understand-cost-mgt-data)). A month counts as final only when a whole-month run was submitted after the grace period, 5 days by default. Workspaces saved with the earlier 3-day default move to 5; set another value in **3 Period**.
 - A run that starts after the first of a month never replaces that month's whole-month run; it shows as CHECK on the Source line. A month covered only by a run still in progress stays provisional.
 - Rows dated outside a run's own start and end dates aren't counted, even when they fall in the same month. They show as CHECK on the Source line and as `ExcludedOutsideRange` in reconciliation. Their raw costs and row counts remain in the reconciliation totals.
 - A manifest that lists the same partition twice is rejected, not counted twice. Identical legitimate charge rows within distinct partitions are still kept.

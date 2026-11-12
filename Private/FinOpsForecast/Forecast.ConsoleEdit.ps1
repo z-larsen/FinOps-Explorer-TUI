@@ -280,7 +280,8 @@ function Edit-ForecastAssumptions {
         Clear-ForecastScreen
         Write-ForecastHeading -Title 'Assumptions'
         $m = $settings.method
-        Write-FinOpsConsole "  Method: median growth; sensitivity P$($m.lowPercentile)-P$($m.highPercentile); flag at $($m.anomalyK) x scaled MAD (minimum $(Format-ForecastPercent (Read-ForecastDecimal $m.anomalyMinimumDeviation))); at least $($m.minimumRetained) retained; backtest horizon $($m.backtestHorizon)"
+        $range = if (Test-ForecastShortHistory -Settings $settings) { "lowest to highest while the lookback is under $($script:ForecastReadyMonths) months (P$($m.lowPercentile) to P$($m.highPercentile) after)" } else { "P$($m.lowPercentile) to P$($m.highPercentile)" }
+        Write-FinOpsConsole "  Method: median growth; sensitivity $range; flag at $($m.anomalyK) x scaled MAD (minimum $(Format-ForecastPercent (Read-ForecastDecimal $m.anomalyMinimumDeviation))); at least $($m.minimumRetained) retained; backtest horizon $($m.backtestHorizon)"
         Write-FinOpsConsole "  Filters: Marketplace $(if ($settings.filters.includeMarketplace) { 'included' } else { 'excluded' }); tax $(if ($settings.filters.includeTax) { 'included' } else { 'excluded' }); credits never counted"
         Write-FinOpsConsole "  Workloads: $($settings.workloads.mode)$(if ($settings.workloads.tagKey) { "; tag key '$($settings.workloads.tagKey)'" })$(if ($settings.workloads.mappingPath) { "; mapping $($settings.workloads.mappingPath)" })"
         Write-FinOpsConsole "  Scheduled items: $(@($settings.scheduledItems).Count)"

@@ -14,18 +14,23 @@ param()
 #          JSON, so amounts and rates are stored as invariant strings.
 ###########################################################################
 
-$script:ForecastSettingsVersion = 1
+$script:ForecastSettingsVersion = 2
 # A forecast can be Ready only with at least this many complete months.
 # Shorter lookbacks (down to 3) produce a Preliminary forecast.
 $script:ForecastReadyMonths = 12
 $script:ForecastMinimumLookbackMonths = 3
+# Azure closes a billing period up to 72 hours after it ends, but usage
+# charges can still change until the fifth day, so a month counts as final
+# five days after it ends. Charges are final once the invoice is issued.
+# https://learn.microsoft.com/azure/cost-management-billing/costs/understand-cost-mgt-data
+$script:ForecastDefaultGraceDays = 5
 
 function New-ForecastDefaultSettings {
     [pscustomobject]@{
         schemaVersion  = $script:ForecastSettingsVersion
         dataMode       = 'Exports'
         scope          = [pscustomobject]@{ kind = 'Subscriptions'; subscriptionIds = @(); billingProfileId = ''; label = '' }
-        period         = [pscustomobject]@{ fiscalYearStartMonth = 1; fiscalYearOffset = 0; lookbackMonths = 12; graceDays = 3; staleAfterDays = 35; windowEnd = 'Auto' }
+        period         = [pscustomobject]@{ fiscalYearStartMonth = 1; fiscalYearOffset = 0; lookbackMonths = 12; graceDays = $script:ForecastDefaultGraceDays; staleAfterDays = 35; windowEnd = 'Auto' }
         filters        = [pscustomobject]@{ includeMarketplace = $false; includeTax = $false }
         method         = [pscustomobject]@{ central = 'Median'; lowPercentile = 25; highPercentile = 75; anomalyK = '3'; anomalyMinimumDeviation = '0.05'; minimumRetained = 8; backtestHorizon = 6 }
         workloads      = [pscustomobject]@{ mode = 'Tag'; tagKey = 'workload'; mappingPath = '' }
@@ -56,6 +61,9 @@ function ConvertTo-ForecastSettings {
             if ($settings.$section.PSObject.Properties.Name -contains $property.Name) { $settings.$section.($property.Name) = $property.Value }
         }
     }
+    # Before schema 2 the default grace was three days, so a stored 3 is that
+    # default rather than a choice. Once saved again, a 3 is kept.
+    if ((-not $Loaded.schemaVersion -or [int]$Loaded.schemaVersion -lt 2) -and [string]$settings.period.graceDays -eq '3') { $settings.period.graceDays = $script:ForecastDefaultGraceDays }
     if ($Loaded.dataMode -in 'Exports', 'Manual') { $settings.dataMode = [string]$Loaded.dataMode }
     $settings.sources = @($Loaded.sources | Where-Object { $null -ne $_ })
     $settings.scheduledItems = @($Loaded.scheduledItems | Where-Object { $null -ne $_ })

@@ -130,7 +130,7 @@ function Get-ForecastGuidedLiveSources {
     param(
         [Parameter(Mandatory)][object[]]$Subscriptions,
         [Parameter(Mandatory)][string]$EarliestMonth,
-        [int]$GraceDays = 3,
+        [int]$GraceDays = $script:ForecastDefaultGraceDays,
         [Parameter(Mandatory)][datetime]$AsOf,
         [AllowNull()]$BillingCheck
     )
@@ -367,7 +367,7 @@ function Write-ForecastHowItWorks {
     Write-FinOpsConsole '    1. Reads each month''s actual cost before Azure credits and Prepayment are applied.'
     Write-FinOpsConsole '    2. Measures how the run rate changed from one month to the next.'
     Write-FinOpsConsole '    3. Projects the rest of the fiscal year from the latest month at the median change;'
-    Write-FinOpsConsole "       the low-to-high range spans P$($Settings.method.lowPercentile) to P$($Settings.method.highPercentile) of those changes."
+    Write-FinOpsConsole "       the low-to-high range runs $(if (Test-ForecastShortHistory -Settings $Settings) { "from the lowest to the highest of those changes until there are $($script:ForecastReadyMonths) months, then P$($Settings.method.lowPercentile) to P$($Settings.method.highPercentile)" } else { "from P$($Settings.method.lowPercentile) to P$($Settings.method.highPercentile) of those changes" })."
     Write-FinOpsConsole '    4. Flags unusual months for you to review, and adds the purchases and changes you schedule.'
     Write-FinOpsConsole "    More detail: $guide" -ForegroundColor DarkGray
     Write-FinOpsConsole ''

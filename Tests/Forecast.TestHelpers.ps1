@@ -115,7 +115,7 @@ function New-SyntheticExportRun {
     # Explicit ranges model runs that start mid-month or stop early.
     if ($PSBoundParameters.ContainsKey('RangeStart')) { $start = $RangeStart.Date }
     if ($PSBoundParameters.ContainsKey('RangeEnd')) { $last = $RangeEnd.Date }
-    if (-not $PSBoundParameters.ContainsKey('Submitted')) { $Submitted = $last.AddDays(5) }
+    if (-not $PSBoundParameters.ContainsKey('Submitted')) { $Submitted = $last.AddDays(7) }
     $range = '{0}-{1}' -f $start.ToString('yyyyMMdd'), $last.ToString('yyyyMMdd')
     $relativeFolder = "exports/$ExportName/$range/$RunId"
     $folder = Join-Path $Root ($relativeFolder -replace '/', [IO.Path]::DirectorySeparatorChar)

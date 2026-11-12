@@ -17,11 +17,16 @@ param()
 #     run rate makes g undefined; a reviewer must acknowledge it.
 #  3. A defined g is flagged when |g - median| exceeds the larger of
 #     K x scaled MAD and a minimum deviation. Flagged changes need a review:
-#     Retain, Exclude from growth, or Step change (retain). Actual charges
-#     are never removed from actuals.
+#     Retain, Exclude from growth, or Step change. A step change is a
+#     one-time move to a new level, such as new reservations covering
+#     usage; the baseline already sits at that level, so the jump is left
+#     out of growth like an exclusion. Actual charges are never removed
+#     from actuals.
 #  4. Central growth is the median of retained g. The sensitivity range uses
-#     the low and high percentiles of retained g. It's historical
-#     variability, not a calibrated confidence interval.
+#     the low and high percentiles of retained g, or the lowest and highest
+#     retained g while the lookback is shorter than a Ready forecast's,
+#     because percentiles of a few changes are mostly interpolation. It's
+#     historical variability, not a calibrated confidence interval.
 #  5. Baseline is the latest month's R unless that month is anomalous, in
 #     which case a separate baseline review chooses the baseline.
 #  6. Month j forecast = Baseline x (1 + g)^h x days(j) / 30, where h counts
@@ -186,22 +191,22 @@ function Get-ForecastComparisons {
                     }
                     $comparison.Suggestion = if ($reverses) { 'Exclude' } elseif ($persisted) { 'StepChange' } else { 'Exclude' }
                     $why = if ($reverses) { "It reverses the flagged change from $($previous.FromMonth) to $($previous.ToMonth): the run rate is back near its earlier trend, which points to a one-off spike or dip rather than a new level." }
-                    elseif ($persisted) { 'The new level held the following month, which suggests sustained growth or a step change.' }
+                    elseif ($persisted) { 'The new level held the following month, which suggests a step change: a one-time move to a new level, such as new reservations or savings plans covering usage.' }
                     else { 'The change didn''t persist into the next month, or it''s the latest comparison.' }
                     $comparison.Review = New-ForecastReviewItem -Key $key -Fingerprint $fingerprint -Category 'Anomaly' -Reviews $Reviews -Subject $comparison.ToMonth `
                         -Title "Anomalous change $($comparison.FromMonth) to $($comparison.ToMonth): $(Format-ForecastPercent $comparison.Change)" `
-                        -Detail "Median change is $(Format-ForecastPercent $median); the flag threshold is +/- $(Format-ForecastPercent $threshold). $why Investigate before excluding. Actual charges stay in actuals either way." `
+                        -Detail "Median change is $(Format-ForecastPercent $median); the flag threshold is +/- $(Format-ForecastPercent $threshold). $why Retain counts it as growth. Exclude and StepChange leave it out of growth; StepChange records that the new level is real, and the baseline already reflects it. Investigate before deciding. Actual charges stay in actuals either way." `
                         -Options @('Retain', 'Exclude', 'StepChange') -Suggested $comparison.Suggestion
                 }
             }
         }
         $decision = if ($comparison.Review) { $comparison.Review.Decision } else { $null }
-        $comparison.Retained = $comparison.Status -eq 'Defined' -and (-not $comparison.Flagged -or $decision -in 'Retain', 'StepChange')
+        $comparison.Retained = $comparison.Status -eq 'Defined' -and (-not $comparison.Flagged -or $decision -eq 'Retain')
         if ($comparison.Status -eq 'Defined') {
             $comparison.Reason = if (-not $comparison.Flagged) { 'Within the normal range.' }
             elseif ($decision -eq 'Pending') { 'Flagged; waiting for review.' }
             elseif ($decision -eq 'Exclude') { 'Flagged and excluded from growth after review.' }
-            elseif ($decision -eq 'StepChange') { 'Flagged; retained as a step change after review.' }
+            elseif ($decision -eq 'StepChange') { 'Flagged; a step change after review, so the new level is in the baseline and the jump is left out of growth.' }
             else { 'Flagged; retained after review.' }
         }
     }
@@ -211,14 +216,31 @@ function Get-ForecastComparisons {
     }
 }
 
+function Test-ForecastShortHistory {
+    # Shorter than a Ready forecast's lookback, so the range is lowest to
+    # highest instead of interpolated percentiles.
+    param([Parameter(Mandatory)]$Settings)
+    return [int]$Settings.period.lookbackMonths -lt $script:ForecastReadyMonths
+}
+
+function Get-ForecastRangeLabel {
+    # How the low-to-high range is chosen, such as "P25 to P75".
+    param([Parameter(Mandatory)]$Settings)
+    if (Test-ForecastShortHistory -Settings $Settings) { return 'lowest to highest' }
+    return "P$($Settings.method.lowPercentile) to P$($Settings.method.highPercentile)"
+}
+
 function Get-ForecastGrowth {
     param([Parameter(Mandatory)]$Comparisons, [Parameter(Mandatory)]$Settings)
     $retained = [decimal[]]@($Comparisons.Items | Where-Object Retained | ForEach-Object { [decimal]$_.Change })
     $minimum = [int]$Settings.method.minimumRetained
-    $low = Read-ForecastDecimal -Value $Settings.method.lowPercentile
-    $high = Read-ForecastDecimal -Value $Settings.method.highPercentile
+    # Percentiles 0 and 100 are exactly the lowest and highest values.
+    $short = Test-ForecastShortHistory -Settings $Settings
+    $low = if ($short) { 0d } else { Read-ForecastDecimal -Value $Settings.method.lowPercentile }
+    $high = if ($short) { 100d } else { Read-ForecastDecimal -Value $Settings.method.highPercentile }
+    $rangeMethod = if ($short) { 'LowestToHighest' } else { 'Percentile' }
     if ($retained.Count -eq 0) {
-        return [pscustomobject]@{ Sufficient = $false; Retained = 0; Minimum = $minimum; Central = $null; Low = $null; High = $null; LowPercentile = $low; HighPercentile = $high }
+        return [pscustomobject]@{ Sufficient = $false; Retained = 0; Minimum = $minimum; Central = $null; Low = $null; High = $null; LowPercentile = $low; HighPercentile = $high; RangeMethod = $rangeMethod }
     }
     [pscustomobject]@{
         Sufficient     = $retained.Count -ge $minimum
@@ -229,6 +251,7 @@ function Get-ForecastGrowth {
         High           = Get-ForecastPercentile -Values $retained -Percentile $high
         LowPercentile  = $low
         HighPercentile = $high
+        RangeMethod    = $rangeMethod
     }
 }
 

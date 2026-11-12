@@ -6,7 +6,7 @@
 param()
 BeforeAll {
     . (Join-Path $PSScriptRoot 'Forecast.TestHelpers.ps1')
-    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-05T12:00:00', [DateTimeKind]::Utc)
+    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-07T12:00:00', [DateTimeKind]::Utc)
     $script:Answers = [Collections.Generic.Queue[string]]::new()
     $script:Console = [Collections.Generic.List[object]]::new()
 

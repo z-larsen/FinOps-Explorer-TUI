@@ -172,9 +172,9 @@ function Get-ForecastMonthEnd {
 
 function Get-ForecastLastEligibleMonth {
     # The latest month that has closed and passed the finalization grace
-    # period as of AsOf. Azure closes a billing period up to 72 hours after
-    # it ends, so the default grace is three days.
-    param([Parameter(Mandatory)][datetime]$AsOf, [int]$GraceDays = 3)
+    # period as of AsOf. Usage can change until the fifth day after a month
+    # ends, so the default grace is five days (ForecastDefaultGraceDays).
+    param([Parameter(Mandatory)][datetime]$AsOf, [int]$GraceDays = $script:ForecastDefaultGraceDays)
     $asOfUtc = ConvertFrom-ForecastDate -Value $AsOf
     $candidate = ConvertTo-ForecastMonthKey -Date $asOfUtc
     for ($i = 0; $i -lt 3; $i++) {

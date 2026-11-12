@@ -160,6 +160,28 @@ Describe 'Copilot review regressions' {
         }
     }
 
+    It 'Treats a month as final five days after it ends' {
+        # Usage can change until the fifth day after a month ends, so November closes at the start of December 6.
+        InModuleScope FinOpsForecast {
+            $settings = New-ForecastDefaultSettings
+            Get-ForecastFirstNeededMonth -Settings $settings -AsOf ([datetime]::SpecifyKind([datetime]'2026-12-05T23:59:00', 'Utc')) | Should -Be '2025-11'
+            Get-ForecastFirstNeededMonth -Settings $settings -AsOf ([datetime]::SpecifyKind([datetime]'2026-12-06T00:00:00', 'Utc')) | Should -Be '2025-12'
+        }
+    }
+
+    It 'Moves the old three-day default to five days, but keeps <Grace> for <Case>' -ForEach @(
+        @{ Case = 'schema 1 at the old default'; Version = 1; Grace = 3; Expected = 5 }
+        @{ Case = 'settings without a schema version'; Version = $null; Grace = 3; Expected = 5 }
+        @{ Case = 'schema 1 with another value'; Version = 1; Grace = 4; Expected = 4 }
+        @{ Case = 'schema 2, where 3 was chosen'; Version = 2; Grace = 3; Expected = 3 }
+    ) {
+        InModuleScope FinOpsForecast -Parameters @{ Version = $Version; Grace = $Grace; Expected = $Expected } {
+            $loaded = [pscustomobject]@{ period = [pscustomobject]@{ graceDays = $Grace } }
+            if ($null -ne $Version) { $loaded | Add-Member -NotePropertyName schemaVersion -NotePropertyValue $Version }
+            (ConvertTo-ForecastSettings -Loaded $loaded).period.graceDays | Should -Be $Expected
+        }
+    }
+
     It 'Blocks saving when a future pinned window is replaced for preview' {
         $settings = New-TestSettings -Mode 'Manual'
         $settings.period.windowEnd = '2027-01'

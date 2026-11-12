@@ -6,7 +6,7 @@
 param()
 BeforeAll {
     . (Join-Path $PSScriptRoot 'Forecast.TestHelpers.ps1')
-    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-05T12:00:00', [DateTimeKind]::Utc)
+    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-07T12:00:00', [DateTimeKind]::Utc)
     $script:Exports = Join-Path $TestDrive 'exports'
     $script:Workspaces = Join-Path $TestDrive 'workspaces'
     $script:Reports = Join-Path $TestDrive 'reports'
