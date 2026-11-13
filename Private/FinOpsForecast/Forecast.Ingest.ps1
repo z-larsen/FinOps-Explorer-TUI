@@ -217,7 +217,7 @@ function Invoke-ForecastRunIngest {
         try { $bytes = Read-ForecastSourceBlob -Source $Source -Name $part.Name }
         catch {
             $partResult.Status = 'Unreadable'; $incomplete = $true
-            $issues.Add((New-ForecastIssue -Code 'RUN-PARTITION' -Message "Partition $(ConvertTo-ForecastSafeText $part.Name 200) couldn't be read: $(ConvertTo-ForecastSafeText $_.Exception.Message 200)"))
+            $issues.Add((New-ForecastIssue -Code 'RUN-PARTITION' -Message "Partition $(ConvertTo-ForecastSafeText $part.Name 200) couldn't be read: $(ConvertTo-ForecastSafeText $_.Exception.Message 300)"))
             $partResults.Add([pscustomobject]$partResult); continue
         }
         $partResult.ActualBytes = [long]$bytes.Length

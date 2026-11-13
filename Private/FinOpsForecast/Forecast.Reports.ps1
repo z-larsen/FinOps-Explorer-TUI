@@ -47,7 +47,7 @@ function Get-ForecastDisclosure {
     $lines.Add("- Pre-credit cost in the billing currency ($currency): CostInBillingCurrency (EA), costInBillingCurrency (MCA), or BilledCost (FOCUS), described by Microsoft as cost before credits or taxes. Negotiated discounts are reflected; list prices are not used.")
     $lines.Add('- Cost Management data doesn''t include Azure credits or taxes; credits found in inputs are reported but never counted.')
     $lines.Add("- Marketplace charges are $(if ($Settings.filters.includeMarketplace) { 'included' } else { 'excluded' }); tax is $(if ($Settings.filters.includeTax) { 'included' } else { 'excluded' }).")
-    $lines.Add("- Source: $(if ($Dataset.Mode -eq 'Manual') { 'manual inputs with recorded evidence' } else { "$(@($Dataset.Runs).Count) selected export run-month(s); see forecast-provenance.csv" }).")
+    $lines.Add("- Source: $(if ($Dataset.Mode -eq 'Manual') { 'manual inputs with recorded evidence' } else { "$(@($Dataset.Runs).Count) selected run-month(s) from $(Get-ForecastSourceCountText -Sources @($Settings.sources)); see forecast-provenance.csv" }).")
     $lines.Add('')
     $lines.Add('LOOKBACK AND COMPARISONS')
     $lines.Add("- Window: $($window.First) to $($window.Last) ($(@($window.Rows).Count) months). The latest month eligible as final is $($window.LastEligible) (grace $($Settings.period.graceDays) days after month end).")

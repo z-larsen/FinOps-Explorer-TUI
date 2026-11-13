@@ -24,6 +24,42 @@ function Get-ForecastAllReviews {
     return @(@($Dataset.Reviews) + @($Model.Reviews) | Where-Object { $null -ne $_ })
 }
 
+function Format-ForecastScopeIssues {
+    # One line for each scope, with the other months it fails in, so a scope
+    # that fails every month doesn't hide the scopes after it.
+    param([Parameter(Mandatory)][object[]]$Issues, [int]$Limit = 5)
+    $groups = [ordered]@{}
+    foreach ($issue in $Issues) {
+        $scope = $issue.PSObject.Properties['Scope']
+        $key = if ($scope -and $scope.Value) { "scope|$($scope.Value)" } else { "issue|$($groups.Count)" }
+        if (-not $groups.Contains($key)) { $groups[$key] = [Collections.Generic.List[object]]::new() }
+        $groups[$key].Add($issue)
+    }
+    $keys = @($groups.Keys)
+    $lines = for ($i = 0; $i -lt [math]::Min($Limit, $keys.Count); $i++) {
+        $group = $groups[$keys[$i]]
+        $others = @($group | Select-Object -Skip 1 | ForEach-Object Subject | Where-Object { $_ -and $_ -ne $group[0].Subject } | Select-Object -Unique)
+        "$($group[0].Message)$(if ($others.Count) { " The same applies to $($others -join ', ')." })"
+    }
+    $hidden = 0
+    for ($i = $Limit; $i -lt $keys.Count; $i++) { $hidden += $groups[$keys[$i]].Count }
+    return "$(@($lines) -join ' ')$(if ($hidden) { " (and $hidden more issue(s))" })"
+}
+
+function Get-ForecastScopeSubscriptionName {
+    # A subscription's name from its cost rows, or else from the live source
+    # that reads it; a subscription that couldn't be read has no rows.
+    param([Parameter(Mandatory)][string]$SubscriptionId, $Dataset, $Settings)
+    $name = [string]$Dataset.SubscriptionNames[$SubscriptionId]
+    if (-not $name) {
+        foreach ($source in @($Settings.sources | Where-Object { $_ -and [string]$_.kind -eq 'CostDetails' })) {
+            if ((ConvertTo-ForecastSubscriptionId -Value ([string]$source.scope)) -eq $SubscriptionId -and $source.label) { $name = ([string]$source.label) -replace '\s*\(live\)$', ''; break }
+        }
+    }
+    if ($name) { return "$(ConvertTo-ForecastSafeText $name 60) ($SubscriptionId)" }
+    return $SubscriptionId
+}
+
 function Test-ForecastReadiness {
     param(
         [Parameter(Mandatory)]$Dataset,
@@ -49,7 +85,7 @@ function Test-ForecastReadiness {
     $outside = @($datasetFails | Where-Object { $_ -notin $blocking })
     $runWarnings = @($Dataset.Issues | Where-Object { $_.Severity -eq 'Warn' -and $_.Code -like 'RUN-*' })
     $sourceStatus = if ($blocking.Count) { 'Fail' } elseif ($outside.Count -or $runWarnings.Count) { 'Warn' } else { 'Pass' }
-    $sourceDetail = if ($blocking.Count) { ($blocking.Message | Select-Object -First 5) -join ' ' }
+    $sourceDetail = if ($blocking.Count) { Format-ForecastScopeIssues -Issues $blocking }
     elseif ($outside.Count -or $runWarnings.Count) {
         $parts = @()
         if ($outside.Count) { $parts += "$($outside.Count) issue(s) in months outside the forecast period." }
@@ -119,8 +155,8 @@ function Test-ForecastReadiness {
         foreach ($subscription in @($Dataset.ScopeSubscriptions | Sort-Object)) {
             $months = $Dataset.Population[$subscription]
             $missing = @($windowMonths | Where-Object { -not $months -or -not $months.Contains($_) })
-            if ($missing.Count -eq $windowMonths.Count) { $gaps.Add("$(ConvertTo-ForecastSafeText ([string]$Dataset.SubscriptionNames[$subscription]) 60) ($subscription) has no run-rate data in the window") }
-            elseif ($missing.Count) { $gaps.Add("$subscription has no run-rate data in $($missing.Count) month(s), first $($missing[0])") }
+            if ($missing.Count -eq $windowMonths.Count) { $gaps.Add("$(Get-ForecastScopeSubscriptionName -SubscriptionId $subscription -Dataset $Dataset -Settings $Settings) has no run-rate data in the window") }
+            elseif ($missing.Count) { $gaps.Add("$(Get-ForecastScopeSubscriptionName -SubscriptionId $subscription -Dataset $Dataset -Settings $Settings) has no run-rate data in $($missing.Count) month(s), first $($missing[0])") }
         }
         if ($gaps.Count) { $labels.Add('Partial population') }
         $checks.Add((New-ForecastCheck -Id 'POPULATION' -Name 'Population' -Status $(if ($gaps.Count) { 'Warn' } else { 'Pass' }) -Detail $(if ($gaps.Count) { "Partial population: $(($gaps | Select-Object -First 5) -join '; ')$(if ($gaps.Count -gt 5) { "; and $($gaps.Count - 5) more" })." } else { 'Every subscription in scope has data in every month of the window.' })))

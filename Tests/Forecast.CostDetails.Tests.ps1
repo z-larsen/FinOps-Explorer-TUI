@@ -41,7 +41,7 @@ BeforeAll {
         $script:Api = @{
             Next = 0; Operations = @{}; Files = @{}; Posts = [Collections.Generic.List[object]]::new(); Gets = [Collections.Generic.List[string]]::new()
             Waits = [Collections.Generic.List[int]]::new(); DailyCost = '10'; DailyCostByMonth = @{}; Kinds = @{}; PostStatus = @{}; GetStatus = @{}
-            NoData = [Collections.Generic.HashSet[string]]::new(); Extra = @{}; Location = $null; Manifest = $null
+            NoData = [Collections.Generic.HashSet[string]]::new(); Extra = @{}; Location = $null; Manifest = $null; ScopeFailure = @{}
         }
         InModuleScope FinOpsForecast { $script:ForecastCostDetailsThrottledUntil = $null }
     }
@@ -68,6 +68,9 @@ BeforeAll {
                 return [pscustomobject]@{ StatusCode = $script:Api.PostStatus[$key]; Content = '{"error":{"code":"SyntheticError","message":"Synthetic request failure"}}'; Headers = @{ 'Retry-After' = @('600') } }
             }
             $scope = $Path.Substring(0, $Path.IndexOf('/providers/Microsoft.CostManagement/'))
+            # Fails every request for one scope with the given status and error body.
+            $failure = $script:Api.ScopeFailure[$scope.ToLowerInvariant()]
+            if ($failure) { return [pscustomobject]@{ StatusCode = $failure.Status; Content = $failure.Content; Headers = @{} } }
             $id = '{0:D8}-0000-0000-0000-000000000000' -f $script:Api.Next++
             $script:Api.Operations[$id] = @{ Scope = $scope; Start = $start; End = $end; Key = $key; Polled = 0 }
             $location = if ($script:Api.Location) { $script:Api.Location } else { "https://management.azure.com$scope/providers/Microsoft.CostManagement/costDetailsOperationResults/$id`?api-version=2025-03-01" }
@@ -274,6 +277,19 @@ Describe 'Cost Details requests' {
         $failure.Exception.Message | Should -BeLike '*HTTP 403*Cost Management read access*'
     }
 
+    It 'Words a <Case> failure plainly' -ForEach @(
+        @{ Case = 'repeated'; Status = 400; Body = '{"error":{"code":"400","message":"Invalid time period.Invalid time period."}}'
+            Expected = 'The Cost Details report for 2026-07-01 to 2026-07-07 failed (HTTP 400): Invalid time period. Check the scope, and that the dates are within the last 13 months.'
+        }
+        @{ Case = 'Visual Studio offer'; Status = 422; Body = '{"error":{"code":"422","message":"Unsupported request. offer type: WebDirect for get detailed report request is not supported.Unsupported request. offer type: WebDirect for get detailed report request is not supported."}}'
+            Expected = 'The Cost Details report for 2026-07-01 to 2026-07-07 failed (HTTP 422): Cost Details reads only EA and MCA subscriptions, and this one''s offer type is WebDirect. Remove its live source in 1 Source.'
+        }
+    ) {
+        $script:Api.ScopeFailure[$script:SubScope.ToLowerInvariant()] = @{ Status = $Status; Content = $Body }
+        $failure = { InModuleScope FinOpsForecast -Parameters @{ Source = (New-CostDetailsSource) } { Read-ForecastCostDetailsPartition -Source $Source -Name 'costdetails/2026-07/20260701-20260707.csv' } } | Should -Throw -PassThru
+        $failure.Exception.Message | Should -BeExactly $Expected
+    }
+
     It 'Stops requesting while Cost Management is throttling' {
         $script:Api.PostStatus['20260701'] = 429
         { InModuleScope FinOpsForecast -Parameters @{ Source = (New-CostDetailsSource) } { Read-ForecastCostDetailsPartition -Source $Source -Name 'costdetails/2026-07/20260701-20260707.csv' } } | Should -Throw '*HTTP 429*'
@@ -408,6 +424,27 @@ Describe 'Cost Details refresh' {
         }
         # 59 weekly chunks for the 12 closed months and 2 for November, then November's 2 again.
         $script:Api.Posts.Count | Should -Be (61 + 2)
+    }
+
+    It 'Names a subscription Cost Details can''t read once in the Source check and by name under Population' {
+        $failing = "/subscriptions/$($script:SyntheticSubscriptions.B)"
+        $script:Api.ScopeFailure[$failing.ToLowerInvariant()] = @{ Status = 422; Content = '{"error":{"code":"422","message":"Unsupported request. offer type: WebDirect for get detailed report request is not supported."}}' }
+        $unsupported = New-CostDetailsSource -Id 'src-b' -Scope $failing -ChunkDays 31
+        $unsupported.label = 'sub-synth-b (live)'
+        $settings = New-CostDetailsSettings -Sources @((New-CostDetailsSource -ChunkDays 31), $unsupported)
+        $settings.scope.subscriptionIds = @($script:SyntheticSubscriptions.A, $script:SyntheticSubscriptions.B)
+        $checks = InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; Settings = $settings; Now = $script:Now } {
+            $null = Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Now
+            $dataset = Get-ForecastDataset -Root $Root -Settings $Settings -Reviews @{}
+            $model = Invoke-ForecastModel -Dataset $dataset -Settings $Settings -Reviews @{} -AsOf $Now
+            (Test-ForecastReadiness -Dataset $dataset -Model $model -Settings $Settings -AsOf $Now).Checks
+        }
+        $source = @($checks | Where-Object Id -EQ 'SOURCE')[0]
+        $source.Status | Should -Be 'Fail'
+        ([regex]::Matches($source.Detail, 'No complete, approved run covers')).Count | Should -Be 1
+        $source.Detail | Should -Match 'offer type is WebDirect\. Remove its live source in 1 Source\.'
+        $source.Detail | Should -Match 'The same applies to (\d{4}-\d{2}, ){11}2026-11\.$'
+        @($checks | Where-Object Id -EQ 'POPULATION')[0].Detail | Should -Match "sub-synth-b \($($script:SyntheticSubscriptions.B)\) has no run-rate data in the window"
     }
 
     It 'Reads earlier months when the lookback grows or the fiscal year starts before it, with fromMonth Auto' {

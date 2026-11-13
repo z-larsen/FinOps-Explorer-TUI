@@ -110,7 +110,7 @@ function Show-ForecastSetupReview {
             $dataset = $session.Dataset
             $model = $session.Model
             $sourceSummary = if ($settings.dataMode -eq 'Manual') { "Manual inputs: $(@($dataset.Months | Where-Object Status -NE 'Missing').Count) month(s) entered" }
-            else { "$(@($settings.sources).Count) export source(s); $(@($dataset.Runs).Count) run-month(s) selected; $(@($dataset.Runs | Where-Object { -not $_.Final }).Count) not final" }
+            else { "$(Get-ForecastSourceCountText -Sources @($settings.sources)); $(@($dataset.Runs).Count) run-month(s) selected; $(@($dataset.Runs | Where-Object { -not $_.Final }).Count) not final" }
             Write-ForecastSectionLine '1' 'Source' $sourceSummary (Get-ForecastCheckStatus $readiness @('SOURCE', 'CURRENCY', 'BOUNDARY'))
             Write-ForecastSectionLine '2' 'Scope' $session.ScopeLabel (Get-ForecastCheckStatus $readiness @('SETTINGS', 'POPULATION'))
             Write-ForecastSectionLine '3' 'Period' "$($model.FiscalYear.Label) ($($model.FiscalYear.FirstMonth) to $($model.FiscalYear.LastMonth)); lookback $($model.Window.First) to $($model.Window.Last)" (Get-ForecastCheckStatus $readiness @('MONTHS', 'HISTORY', 'ACTUALS', 'COMPARISONS', 'RETAINED'))

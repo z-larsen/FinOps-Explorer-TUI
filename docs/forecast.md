@@ -63,7 +63,7 @@ Most of a first refresh is spent waiting while Cost Management builds each live 
 | Live, at the billing account | About 5 weekly reports a month | 5 to 10 reports | An EA or MCA billing reader role on the one account that owns every subscription |
 | Live, each subscription | One report per subscription a month | 1 to 2 reports per subscription | Cost Management Reader on each subscription (EA or MCA only) |
 
-The estimates assume about 35 seconds for a subscription's monthly report, measured on a live tenant, and about a minute for a billing account's weekly report, which covers every subscription. They're rough: large subscriptions take longer, and throttling adds pauses. For example, 124 subscriptions with 4 months of history plus this month need 620 reports read one subscription at a time (about 6 hours), or 22 at the billing account (about 20 minutes). The billing account is only offered for more than three subscriptions; below that, reading each one is faster.
+The estimates assume about a minute for a subscription's monthly report, measured over a first read of 620 reports on a live tenant that took 9.7 hours. A billing account's weekly report covers every subscription, so it's assumed to take about two minutes; that hasn't been measured yet. Both are rough: large subscriptions take longer, and throttling adds pauses. For example, 124 subscriptions with 4 months of history plus this month need 620 reports read one subscription at a time (about 10 hours), or 22 at the billing account (about 45 minutes). The billing account is only offered for more than three subscriptions; below that, reading each one is faster.
 
 With more than 3 months of history, the screen recommends exports if they already cover the months, then the fastest live read you can use. To make a first read faster:
 
@@ -112,7 +112,7 @@ When nobody has set up exports, or you can't reach the files, a **Cost Details**
 
 **Access.** You need Cost Management read access at the scope, such as Cost Management Reader at a subscription, or an EA or MCA billing reader role at a billing scope. On EA, the enrollment's charges-visibility setting must be on. Azure Reader on its own may not show costs. A quick test: if Cost analysis shows actual costs at that scope in the portal, the source should work.
 
-**Scopes.** A subscription (`/subscriptions/<id>`), an EA enrollment, department, or enrollment account, or an MCA billing account, billing profile, invoice section, or customer (`/providers/Microsoft.Billing/billingAccounts/<id>/...`). Management groups and resource groups aren't supported by the API. Only EA and MCA agreements work; pay-as-you-go and Visual Studio subscriptions don't.
+**Scopes.** A subscription (`/subscriptions/<id>`), an EA enrollment, department, or enrollment account, or an MCA billing account, billing profile, invoice section, or customer (`/providers/Microsoft.Billing/billingAccounts/<id>/...`). Management groups and resource groups aren't supported by the API. Only EA and MCA agreements work; pay-as-you-go and Visual Studio subscriptions don't. Cost Management turns those down with HTTP 422 and the offer type, such as WebDirect for Visual Studio, and the refresh says so for each one. Remove their live sources in **1 Source** and their IDs from **2 Scope**; until you do, the Source check fails and the population is partial.
 
 **How far back.** The API reaches 13 months. With **First month** set to **AUTO**, the default, the source requests what the forecast period needs: from the start of the lookback window, or from the fiscal year's first month if that's earlier, plus the current month through yesterday. Set **First month** to a month (yyyy-MM) to fix it, or to NONE to request every whole month the API can still reach. **Last month** narrows the end. A 12-month lookback needs 12 complete months, which the API can return. In the first few days of a month, until last month passes the grace period, the forecast window still starts one month further back than the API can reach. Months an earlier refresh already read are kept for that reason, so refresh at least once a month. A workspace whose very first refresh lands in those days is a month short until the grace period passes. Older history needs exports.
 
@@ -201,6 +201,7 @@ It refreshes, writes reports, and saves a vintage if the forecast is Ready. If i
 - **Fiscal-year totals** add completed months, this month's actuals so far plus the rest of the month, the remaining forecast months, and scheduled items. Low and high each follow one growth path for the whole year.
 - **Month-to-date coverage** comes from the verified run range, bounded by when the run was submitted. Days with no charges aren't forecast again. If selected runs have different coverage cutoffs, Ready is blocked until a refresh brings them into line.
 - **Partial population** means a subscription in scope is missing data in some months. **Stale data** means the last refresh failed or the newest data is old. Both appear on every output.
+- **Source check details** show one line for each failing scope, with the other months it fails in, and count the issues past the first five scopes.
 - **Invalid pinned windows** block Ready and saving a vintage. The preview can use the latest eligible month, but the settings check explains why the requested window was rejected.
 - **Zero and missing amounts** look different in HTML: a measured zero is `0.00`; a missing amount is blank. Table paging keeps keyboard focus on an enabled navigation button.
 
@@ -212,12 +213,12 @@ It refreshes, writes reports, and saves a vintage if the forecast is Ready. If i
 - A run that starts after the first of a month never replaces that month's whole-month run; it shows as CHECK on the Source line. A month covered only by a run still in progress stays provisional.
 - Rows dated outside a run's own start and end dates aren't counted, even when they fall in the same month. They show as CHECK on the Source line and as `ExcludedOutsideRange` in reconciliation. Their raw costs and row counts remain in the reconciliation totals.
 - A manifest that lists the same partition twice is rejected, not counted twice. Identical legitimate charge rows within distinct partitions are still kept.
-- A final month whose last charge precedes month end shows as CHECK on the Source line, in case the export didn't cover the whole month.
+- A final month whose latest charge, across all its runs, precedes month end shows as CHECK on the Source line, in case the export didn't cover the whole month. A quiet subscription, or one billed only for a purchase, doesn't raise it on its own.
 - If an already cached run becomes unreadable or invalid, refresh fails and keeps the last good cache, labeled Stale data.
 - For local copies, updated files must have updated modification times. An in-place change preserving both size and modification time can't be detected from the listing. Changing source settings or ingestion rules requires a refresh.
 - Reconciliation ignores differences under 0.000001, which come from decimal rounding of very long amounts.
 - A first refresh reads about 10 MB of uncompressed CSV a second, roughly 10,000 real cost rows. Thirteen months at a million rows a month takes about 20 to 25 minutes the first time; later refreshes only read new runs. Cost Details sources also wait for each report to be generated.
-- Cost Details reads at subscription scope have run against a live tenant, which is where the 35-second estimate comes from. Billing-scope reads haven't been timed on a live tenant yet. The tests use a synthetic API that follows the documented contract.
+- Cost Details reads at subscription scope have run against a live tenant: 620 reports in 9.7 hours, which is where the one-minute estimate comes from. Billing-scope reads haven't been timed on a live tenant yet. The tests use a synthetic API that follows the documented contract.
 - Windows is the verified platform. The code is cross-platform, but Linux and macOS haven't been tested.
 
 ## Tests

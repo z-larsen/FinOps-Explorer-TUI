@@ -285,6 +285,31 @@ Describe 'Export history' {
             @($history.Dataset.Issues | Where-Object { $_.Code -eq 'RUN-EARLYEND' -and $_.Severity -eq 'Warn' -and $_.Subject -eq '2026-09' }).Count | Should -Be 1
         }
 
+        It 'Doesn''t warn when only a quiet subscription''s run ends early' {
+            # One read per subscription: the month runs to its last day even
+            # though one subscription's last charge comes earlier.
+            $root = New-TestRoot
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -ExportName 'sub-a' -Scope "/subscriptions/$($script:SyntheticSubscriptions.A)" -Month '2026-09' -Parts @(, @(New-SyntheticRow -Date '09/01/2026' -Cost '5'; New-SyntheticRow -Date '09/30/2026' -Cost '5'))
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -ExportName 'sub-b' -Scope "/subscriptions/$($script:SyntheticSubscriptions.B)" -Month '2026-09' -Parts @(, @(New-SyntheticRow -Date '09/19/2026' -Cost '5' -Subscription 'B'))
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root -Subscriptions 'A', 'B')
+            $september = Get-TestMonth $history '2026-09'
+            $september.Status | Should -Be 'Complete'
+            $september.RunRate | Should -Be 15
+            $september.Note | Should -Not -Match 'Last charge'
+            @($history.Dataset.Issues | Where-Object Code -EQ 'RUN-EARLYEND').Count | Should -Be 0
+        }
+
+        It 'Lists one line per scope in the Source check and counts the issues it leaves out' {
+            $line = InModuleScope FinOpsForecast {
+                $issues = @(
+                    foreach ($scope in 'scope-1', 'scope-2') { foreach ($month in '2026-08', '2026-08', '2026-09') { New-ForecastIssue -Code 'RUN-NOELIGIBLE' -Message "No run for $scope." -Subject $month -Scope $scope } }
+                    New-ForecastIssue -Code 'RUN-PARTITION' -Message 'One unscoped issue.' -Subject '2026-09'
+                )
+                Format-ForecastScopeIssues -Issues $issues -Limit 2
+            }
+            $line | Should -BeExactly 'No run for scope-1. The same applies to 2026-09. No run for scope-2. The same applies to 2026-09. (and 1 more issue(s))'
+        }
+
         It 'Rejects amortized cost in an actual-cost <Kind> file (<Case>)' -ForEach @(
             @{ Kind = 'EA'; Case = 'covered usage with a cost'; Row = @{ Date = '10/02/2026'; Cost = '7'; PricingModel = 'Reservation'; CommitmentId = 'ri-1' } }
             @{ Kind = 'MCA'; Case = 'an unused reservation charge'; Row = @{ Date = '10/02/2026'; Cost = '3'; ChargeType = 'UnusedReservation'; PricingModel = 'Reservation'; CommitmentId = 'ri-1' } }

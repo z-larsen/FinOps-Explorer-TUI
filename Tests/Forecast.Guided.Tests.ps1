@@ -255,7 +255,7 @@ Describe 'Guided setup' {
         $settings.method.minimumRetained | Should -Be 3
         $settings.period.fiscalYearStartMonth | Should -Be 7
         # 2026-05 through November, for each subscription.
-        ($script:Console -join "`n") | Should -Match 'asks Cost Management for 14 reports, about 8 minutes'
+        ($script:Console -join "`n") | Should -Match 'asks Cost Management for 14 reports, about 14 minutes'
         ($script:Console -join "`n") | Should -Match 'the forecast will be Preliminary'
         ($script:Console -join "`n") | Should -Not -Match 'The fiscal year started in'
         # The readout comes before the source question, without the billing account for two subscriptions.
@@ -297,7 +297,7 @@ Describe 'Guided setup' {
         $settings.method.minimumRetained | Should -Be 8
         @($settings.scope.subscriptionIds).Count | Should -Be 5
         # 2025-11 through November 2026 in weekly reports.
-        ($script:Console -join "`n") | Should -Match 'asks Cost Management for 61 reports, about 1 hour'
+        ($script:Console -join "`n") | Should -Match 'asks Cost Management for 61 reports, about 2 hours'
         ($script:Console -join "`n") | Should -Match 'Live, at the billing account\n: available: Synthetic MCA \(MCA\)'
         # Checked once, before the estimates, and reused for the live read.
         Should -Invoke Get-ForecastCostDetailsBillingScopes -ModuleName FinOpsForecast -Times 1 -Exactly
@@ -394,13 +394,13 @@ Describe 'Read time estimates' {
         @($estimate.Options.Key) | Should -Be @('Exports', 'Billing', 'Subscriptions')
         $billing = $estimate.Options[1]
         $billing.Reports | Should -Be 22
-        $billing.FirstRead | Should -Be '22 reports, about 20 minutes'
+        $billing.FirstRead | Should -Be '22 reports, about 45 minutes'
         $billing.Available | Should -BeFalse
         $billing.Status | Should -Be 'not available with this sign-in'
         $each = $estimate.Options[2]
         $each.Reports | Should -Be 620
-        $each.FirstRead | Should -Be '620 reports, about 6 hours'
-        $each.Later | Should -Be '124 to 248, about 1 to 2.5 hours'
+        $each.FirstRead | Should -Be '620 reports, about 10 hours'
+        $each.Later | Should -Be '124 to 248, about 2 to 4 hours'
         $estimate.Recommendation | Should -Be 'More than 3 months? Use exports if they already cover these months. With a billing reader role, one set of reports would cover every subscription.'
     }
 
@@ -479,7 +479,7 @@ Describe 'How it works on the review page' {
             Save-ForecastStoredSettings -Root $Root -Settings $settings
         }
         InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Show-ForecastHowItWorks -Root $Root -AsOf $AsOf }
-        ($script:Console -join "`n") | Should -Match 'First read 1870 reports, about 18 hours; each later refresh 150 to 300, about 1\.5 to 3 hours\.'
+        ($script:Console -join "`n") | Should -Match 'First read 1870 reports, about 31 hours; each later refresh 150 to 300, about 2\.5 to 5 hours\.'
     }
 
     It 'Shows a billing account the workspace reads as in use, even for a few subscriptions' {

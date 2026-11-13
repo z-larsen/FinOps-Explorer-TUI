@@ -30,13 +30,31 @@ $script:ForecastDateFormats = [string[]]@(
 )
 
 function New-ForecastIssue {
+    # Scope names the run group an issue belongs to, so a check can show one
+    # line for each scope instead of one scope's every month.
     param(
         [Parameter(Mandatory)][string]$Code,
         [ValidateSet('Fail', 'Warn', 'Info')][string]$Severity = 'Fail',
         [Parameter(Mandatory)][string]$Message,
-        [string]$Subject
+        [string]$Subject,
+        [string]$Scope
     )
-    [pscustomobject]@{ Code = $Code; Severity = $Severity; Message = $Message; Subject = $Subject }
+    $issue = [pscustomobject]@{ Code = $Code; Severity = $Severity; Message = $Message; Subject = $Subject }
+    if ($Scope) { $issue | Add-Member -NotePropertyName Scope -NotePropertyValue $Scope }
+    $issue
+}
+
+function Get-ForecastSourceCountText {
+    # "124 live source(s)", "2 export source(s)", or both. Cost Details
+    # sources are live reads, not exports.
+    param([AllowEmptyCollection()][object[]]$Sources = @())
+    $live = @($Sources | Where-Object { $_ -and [string]$_.kind -eq 'CostDetails' }).Count
+    $exports = @($Sources | Where-Object { $_ }).Count - $live
+    $parts = @()
+    if ($exports) { $parts += "$exports export source(s)" }
+    if ($live) { $parts += "$live live source(s)" }
+    if (-not $parts.Count) { return '0 sources' }
+    return $parts -join ' and '
 }
 
 # Reconciliation differences below a millionth of a currency unit are decimal

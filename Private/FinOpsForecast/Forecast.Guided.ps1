@@ -29,11 +29,12 @@ param()
 # account that owns them is offered so there's one set of reports.
 $script:ForecastGuidedSubscriptionLimit = 3
 # Rough seconds per Cost Details report, for the time estimates. A
-# subscription's monthly report took about 35 seconds on a live tenant. A
-# billing account's weekly report covers every subscription, so it's
-# assumed to take about a minute. Neither is a limit.
-$script:ForecastSubscriptionReportSeconds = 35
-$script:ForecastBillingReportSeconds = 60
+# subscription's monthly report averaged about a minute over a full first
+# read of 620 reports on a live tenant (9.7 hours). A billing account's
+# weekly report covers every subscription in the account, so it's assumed
+# to take about two minutes; that hasn't been measured. Neither is a limit.
+$script:ForecastSubscriptionReportSeconds = 60
+$script:ForecastBillingReportSeconds = 120
 # Weekly reports in a whole month, for estimating later refreshes.
 $script:ForecastBillingReportsPerMonth = 5
 # Exports can reach further back than Cost Details.

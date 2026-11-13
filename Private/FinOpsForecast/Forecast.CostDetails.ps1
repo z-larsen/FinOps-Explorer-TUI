@@ -279,6 +279,16 @@ function Get-ForecastCostDetailsFailure {
         $message = [string]$body.error.message
     }
     catch { Write-Verbose 'The error response had no JSON body.' }
+    $message = ConvertTo-ForecastSafeText $message 1000
+    # The service can send its message twice in a row; keep one copy.
+    if ($message -cmatch '^(?<once>.{8,}?)\s*\k<once>$') { $message = $Matches.once }
+    # A code that only repeats the status number adds nothing.
+    if ($code.Trim() -eq [string]$status) { $code = '' }
+    # Cost Details reads EA and MCA subscriptions only. Other offers, such as
+    # pay-as-you-go and Visual Studio (WebDirect), fail with 422.
+    if ($status -eq 422 -and $message -match '(?i)offer type:?\s*(?<offer>[A-Za-z0-9_-]+)') {
+        return "$Activity failed (HTTP 422): Cost Details reads only EA and MCA subscriptions, and this one's offer type is $($Matches.offer). Remove its live source in 1 Source."
+    }
     $hint = switch ($status) {
         { $_ -in 401, 403 } { ' The signed-in account needs Cost Management read access at this scope, such as Cost Management Reader or an EA or MCA billing reader role. On EA, the enrollment''s view-charges setting must be on.' }
         400 { ' Check the scope, and that the dates are within the last 13 months.' }
@@ -286,8 +296,9 @@ function Get-ForecastCostDetailsFailure {
         429 { ' Cost Management is throttling these requests. Refresh again later; months already read are kept.' }
         default { '' }
     }
-    $detail = if ($code -or $message) { ": $(ConvertTo-ForecastSafeText "$code $message" 300)" } else { '' }
-    return "$Activity failed (HTTP $status)$detail.$hint"
+    $detail = if ($code -or $message) { ": $(ConvertTo-ForecastSafeText "$code $message".Trim() 300)" } else { '' }
+    $end = if ($detail -match '[.!?]$') { '' } else { '.' }
+    return "$Activity failed (HTTP $status)$detail$end$hint"
 }
 
 function ConvertTo-ForecastCostDetailsPollPath {

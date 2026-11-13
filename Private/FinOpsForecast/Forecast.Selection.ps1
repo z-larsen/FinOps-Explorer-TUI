@@ -129,7 +129,7 @@ function Select-ForecastRuns {
         if ($eligible.Count -eq 0) {
             $statuses = (@($byPreference | ForEach-Object { "$($_.Run.Status)/$($_.Coverage)" } | Sort-Object -Unique) -join ', ')
             $reasons = @($byPreference | ForEach-Object { @($_.Run.Issues) } | Where-Object { $_ -and $_.Severity -eq 'Fail' } | ForEach-Object Message | Select-Object -Unique -First 2)
-            $issues.Add((New-ForecastIssue -Code 'RUN-NOELIGIBLE' -Message "No complete, approved run covers $($group.Month) from its first day for $label (runs: $statuses).$(if ($reasons.Count) { ' ' + ($reasons -join ' ') })" -Subject $group.Month))
+            $issues.Add((New-ForecastIssue -Code 'RUN-NOELIGIBLE' -Message "No complete, approved run covers $($group.Month) from its first day for $label (runs: $statuses).$(if ($reasons.Count) { ' ' + ($reasons -join ' ') })" -Subject $group.Month -Scope $label))
             continue
         }
         $chosen = $eligible[0]

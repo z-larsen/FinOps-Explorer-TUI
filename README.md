@@ -450,9 +450,10 @@ The ways to read the history, fastest first:
    reports covers every subscription. It needs an EA or MCA billing reader role
    there, and it's offered for more than three subscriptions.
 3. **Live, one subscription at a time.** The same reports, one subscription per
-   report, and the slowest. A report took about 35 seconds on the live tenant it
-   was measured on, so 124 subscriptions over 5 months (620 reports) would take
-   about 6 hours. Leave the window open while it runs.
+   report, and the slowest. On one live tenant, 124 subscriptions over 5 months
+   (620 reports) took 9.7 hours, about a minute a report. Leave the window open
+   while it runs. Cost Details reads only EA and MCA subscriptions, so take
+   pay-as-you-go and Visual Studio subscriptions out of the sources and scope.
 
 With no access to any of these, type in monthly totals from invoices. Above 3
 months of history, the screen recommends exports if they already cover the

@@ -282,7 +282,9 @@ function Merge-ForecastExportHistory {
             $runResult = $byRun[[string]$selected.RunKey]
             $stat = @($runResult.MonthStats | Where-Object Month -EQ $month)[0]
             $runThrough = if ($stat -and $stat.Through) { [datetime]$stat.Through } else { $null }
-            if ($runThrough -and ($null -eq $observedThrough -or $runThrough -lt $observedThrough)) { $observedThrough = $runThrough }
+            # The month's data reaches as far as its latest charge in any run. A quiet
+            # subscription, or one billed only for a purchase, stops earlier on its own.
+            if ($runThrough -and ($null -eq $observedThrough -or $runThrough -gt $observedThrough)) { $observedThrough = $runThrough }
             if ($runResult.HasManifest -and $runResult.Start -and $runResult.End) {
                 $coveredEnd = Get-ForecastRunLastDate -Start $runResult.Start -End $runResult.End
                 if ($coveredEnd -gt $lastDay) { $coveredEnd = $lastDay }
