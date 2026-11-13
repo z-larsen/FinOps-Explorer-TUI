@@ -220,6 +220,16 @@ Describe 'Copilot review regressions' {
         }
     }
 
+    It 'Fits a chart axis from <Min> to <Max> in round steps of <Step>' -ForEach @(
+        @{ Min = 0; Max = 1.007; Step = 0.2 }
+        @{ Min = 0; Max = 126572.34; Step = 25000 }
+        @{ Min = -0.05; Max = 0.13; Step = 0.05 }
+    ) {
+        InModuleScope FinOpsForecast -Parameters @{ Min = $Min; Max = $Max; Step = $Step } {
+            Get-ForecastChartStep -Min $Min -Max $Max | Should -Be $Step
+        }
+    }
+
     It 'Documents loading the forecast entrypoint before its first direct invocation' {
         $readme = [IO.File]::ReadAllText((Join-Path $script:RepoRoot 'README.md'))
         $section = [regex]::Match($readme, '(?s)## Forecast pre-credit cost and workload growth(.*?)## Reports and privacy').Groups[1].Value

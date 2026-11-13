@@ -182,7 +182,7 @@ function Export-ForecastReport {
         Write-FinOpsReportFile -Directory $directory -Name 'purchases.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $Workloads.Purchases -Columns @('Month', 'SubscriptionId', 'ChargeType', 'CommitmentId', 'Cost'))
     }
     if ($Backtest) { Write-FinOpsReportFile -Directory $directory -Name 'backtest.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $Backtest.Results -Columns @('Cutoff', 'Month', 'Horizon', 'Actual', 'ForecastLow', 'ForecastCentral', 'ForecastHigh', 'ErrorRatio', 'InRange')) }
-    $html = ConvertTo-ForecastHtml -Model $Model -Dataset $Dataset -Readiness $Readiness -Workloads $Workloads -Backtest $Backtest -Disclosure $disclosure -ScopeLabel $ScopeLabel
+    $html = ConvertTo-ForecastHtml -Model $Model -Dataset $Dataset -Readiness $Readiness -Workloads $Workloads -Backtest $Backtest -Disclosure $disclosure -ScopeLabel $ScopeLabel -Settings $Settings -VintageName $VintageName
     Write-FinOpsReportFile -Directory $directory -Name 'forecast-report.html' -Lines @($html)
     return $directory
 }

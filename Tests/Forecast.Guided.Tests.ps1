@@ -103,7 +103,8 @@ Describe 'Preliminary forecasts' {
             (Get-ForecastDisclosure -Model $Result.Model -Dataset $Result.Dataset -Settings $Result.Settings -Readiness $Result.Readiness) -join "`n" | Should -Match 'PRELIMINARY: only 6 months of history \(5 month-to-month changes\)'
             (Get-ForecastDisclosure -Model $Result.Model -Dataset $Result.Dataset -Settings $Result.Settings -Readiness $Result.Readiness) -join "`n" | Should -Match 'Sensitivity range: lowest to highest retained change'
             $html = ConvertTo-ForecastHtml -Model $Result.Model -Dataset $Result.Dataset -Readiness $Result.Readiness -ScopeLabel 'Synthetic'
-            $html | Should -Match '<span class="badge Preliminary">Preliminary</span></p>'
+            ([regex]::Matches($html, '<div class="value">Preliminary</div>')).Count | Should -Be 1
+            $html | Should -Not -Match 'Preliminary \(6 months of history\)'
         }
     }
 

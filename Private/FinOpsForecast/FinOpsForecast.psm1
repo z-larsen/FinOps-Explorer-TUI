@@ -44,6 +44,11 @@ foreach ($helperName in $script:ForecastSharedHelpers) {
 }
 Remove-Variable -Name explorerAst, helperDefinitions, matchingDefinitions, parseErrors, parseTokens -ErrorAction SilentlyContinue
 
+# The HTML report shows FinOps Explorer's version, as the scan report does.
+$versionScript = Join-Path $PSScriptRoot '../Get-VersionNumber.ps1'
+if (Test-Path -LiteralPath $versionScript -PathType Leaf) { . $versionScript }
+Remove-Variable -Name versionScript -ErrorAction SilentlyContinue
+
 foreach ($file in @(
         'Forecast.Common.ps1', 'Forecast.Settings.ps1', 'Forecast.Schema.ps1', 'Forecast.Engine.ps1', 'Forecast.Backtest.ps1',
         'Forecast.Workloads.ps1', 'Forecast.Inputs.ps1', 'Forecast.Sources.ps1', 'Forecast.CostDetails.ps1', 'Forecast.Ingest.ps1', 'Forecast.Selection.ps1',

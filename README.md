@@ -481,6 +481,11 @@ after new reservations. That matters most with 3 months of history, where
 nothing is flagged on its own. A forecast is saved only when every required
 check passes.
 
+The HTML report looks like the scan report. It opens on an overview written for
+executives and finance: the status and what needs attention, a chart of the
+fiscal year by month, how the central estimate adds up, what drives it, and
+quarter totals. Each section has its own tab with the full tables.
+
 See the [usage guide](docs/forecast.md) and the
 [design and integration plan](docs/forecast-design.md).
 

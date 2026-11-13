@@ -177,7 +177,7 @@ You can rank by change, spend, growth, or largest increase. Every workload is li
 
 **F** and **P** write a new private folder under `FinOpsToolkit\Explorer\Reports` with:
 
-- `forecast-report.html`: the whole forecast with filterable tables and the method disclosure.
+- `forecast-report.html`: the whole forecast, laid out like the scan report. It opens on an **Overview** for executive and finance readers: the status and what needs attention, with links to the details; a chart of the fiscal year by month, with actuals, the central forecast, and the low-to-high range; how the central estimate adds up from actuals, the rest of the year's forecast, and scheduled items; the baseline, growth, history, and cost basis behind it; quarter totals; and the largest workload increases. Each section has its own tab: **Fiscal year by month** (with a totals row), **Monthly history** and **Adjacent-month comparisons** (each with a chart), **Workloads**, **Checks**, **Exceptions and reviews**, **Backtest**, **Reconciliation** (every included and excluded amount), and **Method and disclosure**. Tables can be filtered, sorted, paged, resized, and expanded, and printing shows every tab. The page is self-contained and loads nothing from the network.
 - `forecast-summary.txt`: headline numbers, checks, and the method.
 - CSVs for the fiscal-year months, history, comparisons, checks, reviews, reconciliation, provenance (which export run fed each month), workloads, purchases, and the backtest.
 

@@ -74,6 +74,36 @@ Describe 'Forecast end to end' {
         $html | Should -Match '&lt;script&gt;alert'
         $html | Should -Match "Content-Security-Policy"
         $html | Should -Match 'not a confidence interval'
+        # Nothing on the page loads from the network.
+        $html | Should -Not -Match '<(link|img|iframe|object|embed)\b|\ssrc=|url\(\s*[''"]?https?:'
+    }
+
+    It 'Opens the HTML report on an overview, with a tab for each section' {
+        $html = Get-Content -LiteralPath (Join-Path $script:Result.ReportDirectory 'forecast-report.html') -Raw
+        $tabs = [regex]::Matches($html, '<button type="button" class="tab(?<active> active)?" role="tab" id="tabbtn-(?<id>[a-z-]+)"[^>]*>(?<label>[^<]+)</button>')
+        @($tabs | ForEach-Object { $_.Groups['label'].Value }) | Should -Be @('Overview', 'Fiscal year by month', 'Monthly history', 'Adjacent-month comparisons', 'Workloads', 'Checks', 'Exceptions and reviews', 'Backtest', 'Reconciliation', 'Method and disclosure')
+        @($tabs | Where-Object { $_.Groups['active'].Success } | ForEach-Object { $_.Groups['id'].Value }) | Should -Be @('overview')
+        foreach ($tab in $tabs) { $html | Should -Match "<section id=""tab-$($tab.Groups['id'].Value)"" class=""tabpane$(if ($tab.Groups['active'].Success) { ' active' })"" role=""tabpanel""" }
+        # One column per fiscal-year month in the overview chart, and a totals row in the month table.
+        $chart = [regex]::Match($html, '(?s)<svg id="chart-fiscal-year".*?</svg>').Value
+        ([regex]::Matches($chart, '<g class="col">')).Count | Should -Be 12
+        $central = [regex]::Escape((InModuleScope FinOpsForecast -Parameters @{ Value = $script:Result.TotalCentral } { Format-ForecastAmount $Value }))
+        $html | Should -Match "(?s)<table class=""report-table"" id=""table-fiscal-year"".*<tfoot><tr><td>Total</td>.*$central"
+        $html | Should -Match '<h3>Growth and sensitivity</h3><ul><li>'
+    }
+
+    It 'Splits the fiscal year into quarters that add up to its totals' {
+        $quarters = InModuleScope FinOpsForecast -Parameters @{ Base = $script:Workspaces; AsOf = $script:AsOf } {
+            $session = Invoke-ForecastEvaluation -Root (Get-ForecastWorkspaceRoot -WorkspaceName 'synthetic' -WorkspacePath $Base) -AsOf $AsOf
+            [pscustomobject]@{ Projection = $session.Model.Projection; Rows = Get-ForecastQuarterRows -Projection $session.Model.Projection }
+        }
+        @($quarters.Rows).Count | Should -Be 4
+        $quarters.Rows[0].Months | Should -Be 'July to September 2026'
+        $sums = @{ Actual = 0d; Forecast = 0d; Scheduled = 0d; TotalLow = 0d; TotalCentral = 0d; TotalHigh = 0d }
+        foreach ($quarter in $quarters.Rows) { foreach ($name in @($sums.Keys)) { $sums[$name] += [decimal]$quarter.$name } }
+        # Summing by quarter rounds differently from summing by month, in the 28th digit.
+        foreach ($name in 'TotalLow', 'TotalCentral', 'TotalHigh') { [decimal]::Round($sums[$name], 10) | Should -Be ([decimal]::Round([decimal]$quarters.Projection.$name, 10)) -Because $name }
+        [decimal]::Round($sums.Actual + $sums.Forecast + $sums.Scheduled, 10) | Should -Be ([decimal]::Round([decimal]$quarters.Projection.TotalCentral, 10))
     }
 
     It 'Saves the vintage with exact amounts' {
@@ -99,6 +129,11 @@ Describe 'Forecast end to end' {
         $result.Vintage | Should -BeNullOrEmpty
         @($forecastErrors | Where-Object { $_.FullyQualifiedErrorId -like 'FinOpsForecastNotReady*' }).Count | Should -BeGreaterThan 0
         (Get-Content -LiteralPath (Join-Path $result.ReportDirectory 'forecast-summary.txt') -Raw) | Should -Match 'Status: NotReady'
+        # The overview says it isn't ready and links each pending review to its tab.
+        $html = Get-Content -LiteralPath (Join-Path $result.ReportDirectory 'forecast-report.html') -Raw
+        $html | Should -Match '<div class="value">Not ready</div>'
+        $html | Should -Match '<a class="report-jump" data-target="tab-reviews" href="#reviews-heading">\d+ required reviews?</a> to decide in FinOps Explorer: [^<]*Anomalous change'
+        $html | Should -Match '<h2 id="reviews-heading" tabindex="-1">'
         $vintages = InModuleScope FinOpsForecast -Parameters @{ Base = $script:Workspaces } { Get-ForecastVintages -Root (Get-ForecastWorkspaceRoot -WorkspaceName 'synthetic' -WorkspacePath $Base) }
         @($vintages).Count | Should -Be $before
         $reviews = @(Read-ReportCsv $result.ReportDirectory 'forecast-reviews.csv' | Where-Object { $_.Category -eq 'Anomaly' -and $_.Decision -eq 'Pending' })

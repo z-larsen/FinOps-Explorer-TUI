@@ -198,7 +198,7 @@ Validating these against sanitized real exports is the main open task.
 | Expanded datasets | Workloads: 600 workloads × 24 months, no truncation |
 | Baseline anomalies | Engine: separate baseline review and all three decisions |
 | Credits leave the headline unchanged | Exports (FOCUS credit rows) and Inputs (credit charges) |
-| End to end, safety, console | `Forecast.EndToEnd.Tests.ps1`, `Forecast.Safety.Tests.ps1`, `Forecast.Console.Tests.ps1` |
+| End to end, safety, console | `Forecast.EndToEnd.Tests.ps1`, `Forecast.Safety.Tests.ps1`, `Forecast.Console.Tests.ps1`. The HTML report opens on the overview with a tab for each section in order, draws one chart column for each fiscal-year month, totals the month table, splits the year into quarters that add up to it, renders the disclosure as headed lists, and loads nothing from the network; a Not ready overview links each pending review to its tab. Review: chart axes fit the data in round steps |
 | Compiled and PowerShell reducers agree | Exports: exact parity for EA, MCA, and FOCUS, including escaped and date-like tag values |
 | Review decisions stay stable | Exports: a publisher decision survives new rows from the same publisher and reopens for a new one |
 | Nothing dropped silently | Exports: same-month dates outside either endpoint and exclusive month boundaries; raw totals include every excluded row once |
