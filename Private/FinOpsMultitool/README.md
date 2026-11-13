@@ -33,7 +33,7 @@ Choose **Pre-credit forecast and workload growth** at the first interactive Expl
 Start-FinOpsForecast -WorkspaceName contoso-fy27
 ```
 
-This mode combines actuals to date with the remaining fiscal-year forecast and a sensitivity range. It reads EA, MCA, or FOCUS exports, or reviewed manual inputs, and needs at least twelve complete months. Marketplace and tax are excluded by default; purchases and renewals are scheduled separately. Workload analysis explains changes in the 30-day run rate rather than ranking spend alone.
+This mode combines actuals to date with the remaining fiscal-year forecast and a sensitivity range. It reads EA, MCA, or FOCUS exports, requests ActualCost reports straight from Cost Management (the Cost Details API), or takes reviewed manual inputs. A Ready forecast needs at least twelve complete months. With three to eleven months you get a Preliminary forecast, which is reported but never saved. Guided setup signs you in, asks for the history length and the fiscal year's first month, and ranks the ways to read the history by estimated time before you choose one. Marketplace and tax are excluded by default; purchases and renewals are scheduled separately. Workload analysis explains changes in the 30-day run rate rather than ranking spend alone.
 
 See the [forecast usage guide](../../docs/forecast.md) for Setup & Review, inputs, and reports, and the [design and integration plan](../../docs/forecast-design.md) for the method, validation checks, tests, and limitations. The data-source instructions below describe the scan workflow, not the forecast's historical ingestion.
 
@@ -57,7 +57,13 @@ Install-Module Az.Accounts, Az.ResourceGraph, Az.Storage -Scope CurrentUser
 
 ### 1. Authentication
 
-On an interactive launch, the TUI checks for an existing `Az.Accounts` session and starts `Connect-AzAccount` when needed. `-NonInteractive` requires an existing Azure context; authenticate with the intended identity first. If you supply `-SubscriptionId`, the subscription must resolve in the current tenant. A failed or mismatched lookup stops without searching other tenants or widening the scan. A valid lookup selects that subscription for the current process only. Otherwise, the tool offers a tenant menu when supported and discovers subscriptions in the selected tenant. A missing or changed tenant stops subscription enumeration, and every selected subscription must belong to that tenant before source discovery.
+On an interactive launch, the TUI checks for an existing `Az.Accounts` session and starts `Connect-AzAccount` when needed. `-NonInteractive` requires an existing Azure context; authenticate with the intended identity first. Unattended runs never switch tenants. If you supply `-SubscriptionId`, the subscription must resolve in the current tenant. A failed or mismatched lookup stops without searching other tenants or widening the scan. A valid lookup selects that subscription for the current process only.
+
+Otherwise, an interactive run lists the tenants you can reach by name, never by ID. A tenant with no name shows its domain, and tenants that share a name add their domains. In the arrow-key list, type part of a name to narrow it, press Enter to choose, or press Esc to clear the text and then stay in the current tenant. Numbered consoles, including `-Accessible`, take a number or part of a name instead.
+
+Explorer signs in to the chosen tenant and lists only that tenant's subscriptions. A missing or changed tenant stops subscription enumeration. Every selected subscription must belong to that tenant before source discovery. While it signs in, Explorer turns off Az's own subscription list, which spans every tenant, for that PowerShell session only and restores your setting afterward. Saved Az settings aren't changed.
+
+A saved sign-in can expire, or a tenant can ask for MFA again. Az then lists only tenant IDs, or no subscriptions, with a warning that names the tenant. Explorer recognizes this, says so, and signs in to that tenant again before it reads anything. If the last tenant's sign-in can't be renewed, Explorer offers a fresh sign-in. An unattended run stops with the `Connect-AzAccount -TenantId <id>` command that renews the sign-in. Signing in again to the same tenant never widens an explicit `-SubscriptionId`.
 
 ### 2. Data source selection
 
@@ -84,7 +90,7 @@ Choose one export when prompted; exports aren't combined automatically. Unattend
 
 ### 3. Scan selection
 
-Use arrow-key menus to select scans when your host supports them. Other hosts use numbered prompts. Use `-Accessible` to select numbered prompts in any console without clearing the screen or repainting menu rows. This mode stays in the signed-in tenant; sign in separately to use another tenant. For automation, use `-NonInteractive` with `-Scans`, `-DataSource`, and `-SubscriptionId`. `-NonInteractive` disables prompts even when `-Accessible` is also set. Reports are saved automatically; `-OutputPath` changes their parent folder. All menu scans are selected by default except **Billing Structure**.
+Use arrow-key menus to select scans when your host supports them. Other hosts use numbered prompts. Use `-Accessible` to select numbered prompts in any console without clearing the screen or repainting menu rows; the tenant list is numbered too. For automation, use `-NonInteractive` with `-Scans`, `-DataSource`, and `-SubscriptionId`. It stays in the signed-in tenant, so sign in to the intended tenant first. `-NonInteractive` disables prompts even when `-Accessible` is also set. Reports are saved automatically; `-OutputPath` changes their parent folder. All menu scans are selected by default except **Billing Structure**.
 
 In accessible mode, three invalid or blank source-menu answers cancel the run instead of choosing a source. A Hub-to-API confirmation requires an explicit yes or no; invalid or blank answers cancel without starting a scan.
 

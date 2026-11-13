@@ -1,6 +1,6 @@
 # Pre-credit forecast and workload growth
 
-FinOps Explorer can forecast a fiscal year of Azure spend from your own Cost Management exports. You get actuals to date plus the rest of the year, a central estimate, and a low-to-high sensitivity range. It also shows which workloads drove the growth.
+FinOps Explorer can forecast a fiscal year of Azure spend from your own Cost Management data: exports, reports it requests live, or monthly totals you type in. You get actuals to date plus the rest of the year, a central estimate, and a low-to-high sensitivity range. It also shows which workloads drove the growth.
 
 All amounts are **pre-credit**: what Cost Management reports before Azure credits and Azure Prepayment are applied. That's `CostInBillingCurrency` (EA), `costInBillingCurrency` (MCA), or `BilledCost` (FOCUS). Negotiated discounts are included and list prices aren't used. Marketplace and tax are excluded by default.
 
@@ -118,7 +118,7 @@ When nobody has set up exports, or you can't reach the files, a **Cost Details**
 
 **After an EA-to-MCA move**, EA history stays in the EA enrollment and MCA history starts in the billing profile. Add one source for each, set **T** to the transition date, and give the EA source a last month and the MCA source a first month around it. See [the sample config](../samples/forecast/forecast-config.costdetails.sample.json). Each side needs its own access: a subscription that moved to MCA usually shows only its MCA costs at subscription scope.
 
-**Large scopes.** Each report covers a week by default. Microsoft recommends day or week chunks, and Exports, above roughly 2 GB or 2 million rows a month. For a month that size, a first refresh means about 65 report requests and several gigabytes of downloads, and can take an hour. Set **Days per report** to 1 if a single week's report is too large to hold in memory.
+**Large scopes.** Guided setup asks for a month per subscription report and a week per billing-account report; a source you add by hand starts at a week. Microsoft recommends day or week chunks, and Exports, above roughly 2 GB or 2 million rows a month. For a month that size at a week per report, a first refresh means about 65 report requests and several gigabytes of downloads, and can take an hour. Lower **Days per report** (1 to 31) if a single report is too large to hold in memory.
 
 **What's cached.** A month read at least the grace period after it closed is kept and never requested again. The current month and newly closed months are requested again on later refreshes, but not more than once every four hours, since Cost Management only refreshes these reports about that often. A whole month read before the grace period ended is kept too once Cost Details can no longer return it, since it may be the only copy, but it stays provisional, and the refresh says so while the forecast needs it. That can happen after the grace period changes. If a chunk fails, its month stays out until the next refresh reads it. If a refresh stops partway, months it already read completely are kept, so the next refresh carries on.
 
