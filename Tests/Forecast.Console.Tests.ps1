@@ -56,6 +56,38 @@ Describe 'Forecast console' {
         ($script:Console.Text -join "`n") | Should -Match 'Forecast saved'
     }
 
+    It 'Reviews a change the forecast didn''t flag from 5 Exceptions' {
+        # Run rates 3,000, 1,500, and 1,530. Two changes can't be flagged, but the drop is new commitments covering usage.
+        $exports = Join-Path $TestDrive 'console-by-hand'
+        foreach ($entry in @(@('2026-08', 3100), @('2026-09', 1500), @('2026-10', 1581))) {
+            $null = New-SyntheticExportRun -Root $exports -Kind 'MCA' -Month $entry[0] -Scope $script:ProfileScope -Parts @(, @(New-SyntheticMonthRows -Month $entry[0] -Total $entry[1]))
+        }
+        $root = Get-Workspace -Name 'console-by-hand'
+        $settings = New-TestSettings -Root $exports -StartMonth 8
+        $settings.period.lookbackMonths = 3
+        $settings.method.minimumRetained = 1
+        InModuleScope FinOpsForecast -Parameters @{ Root = $root; Settings = $settings } { Save-ForecastStoredSettings -Root $Root -Settings $Settings }
+        Set-TestAnswers @('R', '', '5', 'C', '1', '3', 'Reservations bought in September', 'B', 'Q')
+        InModuleScope FinOpsForecast -Parameters @{ Root = $root; AsOf = $script:AsOf } { Show-ForecastSetupReview -Root $Root -AsOf $AsOf }
+        Get-RedLines | Should -BeNullOrEmpty
+        $script:Answers.Count | Should -Be 0
+        ($script:Console.Text -join "`n") | Should -Match 'Nothing needs a decision'
+        $session = InModuleScope FinOpsForecast -Parameters @{ Root = $root; AsOf = $script:AsOf } { Invoke-ForecastEvaluation -Root $Root -AsOf $AsOf }
+        $drop = $session.Model.Comparisons.Items[0]
+        $drop.Review.Decision | Should -Be 'StepChange'
+        $drop.Review.Note | Should -Be 'Reservations bought in September'
+        $drop.Retained | Should -BeFalse
+        $session.Model.Growth.Central | Should -Be 0.02
+    }
+
+    It 'Keeps a filtered Exceptions list to its own category' {
+        $session = [pscustomobject]@{ Readiness = [pscustomobject]@{ Reviews = @() }; Model = [pscustomobject]@{ Comparisons = [pscustomobject]@{ Items = @([pscustomobject]@{ Status = 'Defined' }) } } }
+        Set-TestAnswers @('')
+        InModuleScope FinOpsForecast -Parameters @{ Session = $session } { Show-ForecastExceptions -Root 'unused' -Session $Session -Category 'ManualMonth' }
+        ($script:Console.Text -join "`n") | Should -Match 'Nothing to review'
+        $script:Answers.Count | Should -Be 0
+    }
+
     It 'Adds and edits a Cost Details source' {
         $root = Get-Workspace -Name 'console-costdetails'
         InModuleScope FinOpsForecast -Parameters @{ Root = $root; Settings = (New-TestSettings) } { Save-ForecastStoredSettings -Root $Root -Settings $Settings }

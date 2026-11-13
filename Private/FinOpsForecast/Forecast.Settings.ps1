@@ -14,16 +14,19 @@ param()
 #          JSON, so amounts and rates are stored as invariant strings.
 ###########################################################################
 
-$script:ForecastSettingsVersion = 2
+$script:ForecastSettingsVersion = 3
 # A forecast can be Ready only with at least this many complete months.
 # Shorter lookbacks (down to 3) produce a Preliminary forecast.
 $script:ForecastReadyMonths = 12
 $script:ForecastMinimumLookbackMonths = 3
-# Azure closes a billing period up to 72 hours after it ends, but usage
-# charges can still change until the fifth day, so a month counts as final
-# five days after it ends. Charges are final once the invoice is issued.
+# Azure closes a billing period up to 72 hours after it ends, and usage
+# charges can still change until the fifth day after it ends. A daily cost
+# export rewrites the prior month on each of the first five days of a month
+# to match the invoice, so its last copy arrives on day 5. A month counts as
+# final from 00:00 UTC on that day: four days after the month ends.
 # https://learn.microsoft.com/azure/cost-management-billing/costs/understand-cost-mgt-data
-$script:ForecastDefaultGraceDays = 5
+# https://learn.microsoft.com/azure/cost-management-billing/costs/tutorial-improved-exports
+$script:ForecastDefaultGraceDays = 4
 
 function New-ForecastDefaultSettings {
     [pscustomobject]@{
@@ -61,9 +64,12 @@ function ConvertTo-ForecastSettings {
             if ($settings.$section.PSObject.Properties.Name -contains $property.Name) { $settings.$section.($property.Name) = $property.Value }
         }
     }
-    # Before schema 2 the default grace was three days, so a stored 3 is that
-    # default rather than a choice. Once saved again, a 3 is kept.
-    if ((-not $Loaded.schemaVersion -or [int]$Loaded.schemaVersion -lt 2) -and [string]$settings.period.graceDays -eq '3') { $settings.period.graceDays = $script:ForecastDefaultGraceDays }
+    # The default grace was three days before schema 2 and five days in
+    # schema 2, so a stored value equal to its schema's default is that
+    # default rather than a choice. Once saved again, any value is kept.
+    $loadedVersion = if ($Loaded.schemaVersion) { [int]$Loaded.schemaVersion } else { 1 }
+    $earlierDefault = if ($loadedVersion -lt 2) { '3' } elseif ($loadedVersion -eq 2) { '5' } else { $null }
+    if ($earlierDefault -and [string]$settings.period.graceDays -eq $earlierDefault) { $settings.period.graceDays = $script:ForecastDefaultGraceDays }
     if ($Loaded.dataMode -in 'Exports', 'Manual') { $settings.dataMode = [string]$Loaded.dataMode }
     $settings.sources = @($Loaded.sources | Where-Object { $null -ne $_ })
     $settings.scheduledItems = @($Loaded.scheduledItems | Where-Object { $null -ne $_ })

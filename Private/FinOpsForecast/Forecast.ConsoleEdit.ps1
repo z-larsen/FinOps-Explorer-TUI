@@ -262,7 +262,7 @@ function Edit-ForecastPeriod {
     $period.fiscalYearOffset = Read-ForecastInteger -Prompt 'Fiscal year: 0 current, 1 next' -Default $period.fiscalYearOffset -Minimum 0 -Maximum 1
     $previousLookback = [int]$period.lookbackMonths
     $period.lookbackMonths = Read-ForecastInteger -Prompt "Lookback in complete months (under $($script:ForecastReadyMonths) is Preliminary)" -Default $period.lookbackMonths -Minimum $script:ForecastMinimumLookbackMonths -Maximum 36
-    $period.graceDays = Read-ForecastInteger -Prompt 'Days after month end before a month counts as final' -Default $period.graceDays -Minimum 0 -Maximum 10
+    $period.graceDays = Read-ForecastInteger -Prompt 'Days after month end before a month counts as final (4 = from the 5th)' -Default $period.graceDays -Minimum 0 -Maximum 10
     $period.staleAfterDays = Read-ForecastInteger -Prompt 'Days before data is labeled stale' -Default $period.staleAfterDays -Minimum 1 -Maximum 365
     $end = Read-ForecastText -Prompt 'Window end: Auto, or a month (yyyy-MM) to pin it' -Default $period.windowEnd
     $period.windowEnd = if ($end -match '^(?i)auto$') { 'Auto' } else { $end }

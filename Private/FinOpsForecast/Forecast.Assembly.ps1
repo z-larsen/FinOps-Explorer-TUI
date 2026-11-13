@@ -269,6 +269,10 @@ function Merge-ForecastExportHistory {
         }
         $final = @($selectedRuns | Where-Object { -not $_.Final }).Count -eq 0
         $status = if ($notes.Count) { 'Incomplete' } elseif ($final) { 'Complete' } else { 'Provisional' }
+        # A whole month read before the grace period ended can still change.
+        if ($status -eq 'Provisional' -and @($selectedRuns | Where-Object { -not $_.Final -and $_.Coverage -in 'Full', 'Unknown' }).Count) {
+            $notes.Add("Read less than $([int]$Settings.period.graceDays) days after the month ended, before it counted as final.")
+        }
         if ($totals.Currencies.Count -gt 1) { $notes.Add("Multiple billing currencies: $(@($totals.Currencies) -join ', ').") }
         $through = $null; $observedThrough = $null
         $coverageDates = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)

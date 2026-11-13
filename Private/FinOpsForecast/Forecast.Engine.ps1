@@ -20,15 +20,19 @@ param()
 #     Retain, Exclude from growth, or Step change. A step change is a
 #     one-time move to a new level, such as new reservations covering
 #     usage; the baseline already sits at that level, so the jump is left
-#     out of growth like an exclusion. Actual charges are never removed
-#     from actuals.
+#     out of growth like an exclusion. Any other change can be reviewed by
+#     hand the same way, since with few changes nothing can be flagged.
+#     Actual charges are never removed from actuals.
 #  4. Central growth is the median of retained g. The sensitivity range uses
 #     the low and high percentiles of retained g, or the lowest and highest
 #     retained g while the lookback is shorter than a Ready forecast's,
 #     because percentiles of a few changes are mostly interpolation. It's
 #     historical variability, not a calibrated confidence interval.
-#  5. Baseline is the latest month's R unless that month is anomalous, in
-#     which case a separate baseline review chooses the baseline.
+#  5. Baseline is the latest month's R unless that month is anomalous: its
+#     change was flagged, undefined, or excluded or marked a step change by
+#     hand. Then a separate baseline review chooses the baseline, suggesting
+#     the latest month after a step change and the median of the last three
+#     months otherwise.
 #  6. Month j forecast = Baseline x (1 + g)^h x days(j) / 30, where h counts
 #     months after the window's last month. Scheduled items add their net
 #     effect to every path.
@@ -126,6 +130,27 @@ function Get-ForecastWindow {
     [pscustomobject]@{ First = $first; Last = $end; LastEligible = $lastEligible; Pinned = ($end -ne $lastEligible); Rows = @($rows); Issues = $issues.ToArray() }
 }
 
+function Get-ForecastComparisonIdentity {
+    # The review key and data fingerprint of one month-to-month change.
+    param([Parameter(Mandatory)]$Comparison, [string]$ScopeKey = '')
+    [pscustomobject]@{
+        Key         = "comparison:${ScopeKey}:$($Comparison.ToMonth)"
+        Fingerprint = Get-ForecastHash -Text ("{0}|{1}|{2}|{3}" -f $Comparison.FromMonth, $Comparison.ToMonth, (Format-ForecastDecimal $Comparison.FromRunRate), (Format-ForecastDecimal $Comparison.ToRunRate))
+    }
+}
+
+function New-ForecastComparisonReview {
+    # A review of a change that wasn't flagged, for when you know why the run
+    # rate moved, or there are too few changes for any to be flagged.
+    param([Parameter(Mandatory)]$Comparison, [string]$ScopeKey = '', [Collections.IDictionary]$Reviews, $Median, $Threshold)
+    $identity = Get-ForecastComparisonIdentity -Comparison $Comparison -ScopeKey $ScopeKey
+    $context = if ($null -ne $Median -and $null -ne $Threshold) { "It isn't flagged: the median change is $(Format-ForecastPercent $Median), and the flag threshold is +/- $(Format-ForecastPercent $Threshold). " } else { '' }
+    New-ForecastReviewItem -Key $identity.Key -Fingerprint $identity.Fingerprint -Category 'Comparison' -Reviews $Reviews -Subject $Comparison.ToMonth `
+        -Title "Change $($Comparison.FromMonth) to $($Comparison.ToMonth): $(Format-ForecastPercent $Comparison.Change), reviewed by hand" `
+        -Detail "${context}Review it by hand when you know why the run rate moved, such as new reservations or savings plans covering usage, or a migration. Retain counts it as growth. Exclude and StepChange leave it out of growth; StepChange records that the new level is real. Actual charges stay in actuals either way." `
+        -Options @('Retain', 'Exclude', 'StepChange') -Suggested 'Retain'
+}
+
 function Get-ForecastComparisons {
     param(
         [Parameter(Mandatory)][object[]]$Rows,
@@ -161,8 +186,9 @@ function Get-ForecastComparisons {
 
     for ($i = 0; $i -lt $comparisons.Count; $i++) {
         $comparison = $comparisons[$i]
-        $fingerprint = Get-ForecastHash -Text ("{0}|{1}|{2}|{3}" -f $comparison.FromMonth, $comparison.ToMonth, (Format-ForecastDecimal $comparison.FromRunRate), (Format-ForecastDecimal $comparison.ToRunRate))
-        $key = "comparison:${ScopeKey}:$($comparison.ToMonth)"
+        $identity = Get-ForecastComparisonIdentity -Comparison $comparison -ScopeKey $ScopeKey
+        $fingerprint = $identity.Fingerprint
+        $key = $identity.Key
         switch ($comparison.Status) {
             'MissingData' {
                 $comparison.Reason = 'A month in this pair is missing or not final.'
@@ -198,16 +224,25 @@ function Get-ForecastComparisons {
                         -Detail "Median change is $(Format-ForecastPercent $median); the flag threshold is +/- $(Format-ForecastPercent $threshold). $why Retain counts it as growth. Exclude and StepChange leave it out of growth; StepChange records that the new level is real, and the baseline already reflects it. Investigate before deciding. Actual charges stay in actuals either way." `
                         -Options @('Retain', 'Exclude', 'StepChange') -Suggested $comparison.Suggestion
                 }
+                elseif ($Reviews -and $Reviews.ContainsKey($key)) {
+                    # A change reviewed by hand keeps its decision until its data changes.
+                    $comparison.Review = New-ForecastComparisonReview -Comparison $comparison -ScopeKey $ScopeKey -Reviews $Reviews -Median $median -Threshold $threshold
+                }
             }
         }
         $decision = if ($comparison.Review) { $comparison.Review.Decision } else { $null }
-        $comparison.Retained = $comparison.Status -eq 'Defined' -and (-not $comparison.Flagged -or $decision -eq 'Retain')
+        $comparison.Retained = $comparison.Status -eq 'Defined' -and $(if ($comparison.Flagged) { $decision -eq 'Retain' } else { $decision -notin 'Exclude', 'StepChange' })
         if ($comparison.Status -eq 'Defined') {
-            $comparison.Reason = if (-not $comparison.Flagged) { 'Within the normal range.' }
-            elseif ($decision -eq 'Pending') { 'Flagged; waiting for review.' }
-            elseif ($decision -eq 'Exclude') { 'Flagged and excluded from growth after review.' }
-            elseif ($decision -eq 'StepChange') { 'Flagged; a step change after review, so the new level is in the baseline and the jump is left out of growth.' }
-            else { 'Flagged; retained after review.' }
+            $comparison.Reason = if ($comparison.Flagged) {
+                if ($decision -eq 'Pending') { 'Flagged; waiting for review.' }
+                elseif ($decision -eq 'Exclude') { 'Flagged and excluded from growth after review.' }
+                elseif ($decision -eq 'StepChange') { 'Flagged; a step change after review, so the jump is left out of growth.' }
+                else { 'Flagged; retained after review.' }
+            }
+            elseif ($decision -eq 'Exclude') { 'Excluded from growth after review.' }
+            elseif ($decision -eq 'StepChange') { 'A step change after review, so the jump is left out of growth.' }
+            elseif ($decision -eq 'Pending') { 'Within the normal range; its data changed since it was reviewed, so it needs a new review.' }
+            else { 'Within the normal range.' }
         }
     }
     [pscustomobject]@{
@@ -266,15 +301,23 @@ function Get-ForecastBaseline {
     $recent = [decimal[]]@($ordered | Select-Object -Last 3 | Where-Object { Test-ForecastMonthUsable $_ } | ForEach-Object { Get-ForecastNormalizedRunRate $_ })
     $medianRecent = if ($recent.Count) { Get-ForecastMedian -Values $recent } else { $null }
     $lastComparison = @($Comparisons.Items)[-1]
-    $anomalous = $lastComparison -and ($lastComparison.Flagged -or $lastComparison.Status -eq 'Undefined')
+    $lastDecision = if ($lastComparison -and $lastComparison.Review) { [string]$lastComparison.Review.Decision } else { '' }
+    $stepped = $lastDecision -eq 'StepChange'
+    $anomalous = $lastComparison -and ($lastComparison.Flagged -or $lastComparison.Status -eq 'Undefined' -or $lastDecision -in 'Exclude', 'StepChange')
     if (-not $anomalous) {
         return [pscustomobject]@{ Value = $latestRate; Method = 'LatestMonth'; Month = $last.Month; Review = $null; Pending = $false; Detail = "Run rate of $($last.Month)." }
     }
-    $fingerprint = Get-ForecastHash -Text ((@($ordered | Select-Object -Last 3 | ForEach-Object { "$($_.Month)=$(Format-ForecastDecimal $_.RunRate)" })) -join '|')
+    # A step change into the latest month makes it the new level, so it's
+    # suggested instead, and an answer given before the step change is asked
+    # again.
+    $fingerprint = Get-ForecastHash -Text (((@($ordered | Select-Object -Last 3 | ForEach-Object { "$($_.Month)=$(Format-ForecastDecimal $_.RunRate)" })) -join '|') + $(if ($stepped) { '|StepChange' } else { '' }))
+    $levels = "Latest month run rate $(Format-ForecastAmount $latestRate); median of the last three months $(Format-ForecastAmount $medianRecent)."
+    $reviewDetail = if ($stepped) { "You marked the change from $($lastComparison.FromMonth) to $($lastComparison.ToMonth) as a step change, so LatestMonth is suggested: the latest month is the new level. Choose Manual, with a value and a reason, if the step happened partway through the month. $levels" }
+    else { "$levels Choose LatestMonth, MedianLast3, or Manual with a value and a reason." }
     $review = New-ForecastReviewItem -Key "baseline:${ScopeKey}:$($last.Month)" -Fingerprint $fingerprint -Category 'Baseline' -Reviews $Reviews -Subject $last.Month `
         -Title "Baseline review: $($last.Month) is anomalous" `
-        -Detail "Latest month run rate $(Format-ForecastAmount $latestRate); median of the last three months $(Format-ForecastAmount $medianRecent). Choose LatestMonth, MedianLast3, or Manual with a value and a reason." `
-        -Options @('LatestMonth', 'MedianLast3', 'Manual') -Suggested 'MedianLast3'
+        -Detail $reviewDetail `
+        -Options @('LatestMonth', 'MedianLast3', 'Manual') -Suggested $(if ($stepped) { 'LatestMonth' } else { 'MedianLast3' })
     $value = $latestRate; $method = 'LatestMonth'; $detail = 'Pending review; the latest month is used provisionally.'
     switch ($review.Decision) {
         'LatestMonth' { $value = $latestRate; $method = 'LatestMonth'; $detail = "Reviewed: run rate of $($last.Month)." }

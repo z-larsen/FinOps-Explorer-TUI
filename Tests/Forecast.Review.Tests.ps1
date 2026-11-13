@@ -160,20 +160,22 @@ Describe 'Copilot review regressions' {
         }
     }
 
-    It 'Treats a month as final five days after it ends' {
-        # Usage can change until the fifth day after a month ends, so November closes at the start of December 6.
+    It 'Treats a month as final from the fifth day after it ends' {
+        # A daily export writes its last copy of a closed month on day 5, so November is final from the start of December 5.
         InModuleScope FinOpsForecast {
             $settings = New-ForecastDefaultSettings
-            Get-ForecastFirstNeededMonth -Settings $settings -AsOf ([datetime]::SpecifyKind([datetime]'2026-12-05T23:59:00', 'Utc')) | Should -Be '2025-11'
-            Get-ForecastFirstNeededMonth -Settings $settings -AsOf ([datetime]::SpecifyKind([datetime]'2026-12-06T00:00:00', 'Utc')) | Should -Be '2025-12'
+            Get-ForecastFirstNeededMonth -Settings $settings -AsOf ([datetime]::SpecifyKind([datetime]'2026-12-04T23:59:00', 'Utc')) | Should -Be '2025-11'
+            Get-ForecastFirstNeededMonth -Settings $settings -AsOf ([datetime]::SpecifyKind([datetime]'2026-12-05T00:00:00', 'Utc')) | Should -Be '2025-12'
         }
     }
 
-    It 'Moves the old three-day default to five days, but keeps <Grace> for <Case>' -ForEach @(
-        @{ Case = 'schema 1 at the old default'; Version = 1; Grace = 3; Expected = 5 }
-        @{ Case = 'settings without a schema version'; Version = $null; Grace = 3; Expected = 5 }
-        @{ Case = 'schema 1 with another value'; Version = 1; Grace = 4; Expected = 4 }
-        @{ Case = 'schema 2, where 3 was chosen'; Version = 2; Grace = 3; Expected = 3 }
+    It 'Reads a stored grace of <Grace> in <Case> as <Expected> days' -ForEach @(
+        @{ Case = 'schema 1, its default'; Version = 1; Grace = 3; Expected = 4 }
+        @{ Case = 'settings without a schema version'; Version = $null; Grace = 3; Expected = 4 }
+        @{ Case = 'schema 2, its default'; Version = 2; Grace = 5; Expected = 4 }
+        @{ Case = 'schema 1, where it was chosen'; Version = 1; Grace = 5; Expected = 5 }
+        @{ Case = 'schema 2, where it was chosen'; Version = 2; Grace = 3; Expected = 3 }
+        @{ Case = 'schema 3'; Version = 3; Grace = 5; Expected = 5 }
     ) {
         InModuleScope FinOpsForecast -Parameters @{ Version = $Version; Grace = $Grace; Expected = $Expected } {
             $loaded = [pscustomobject]@{ period = [pscustomobject]@{ graceDays = $Grace } }

@@ -160,6 +160,26 @@ function Show-ForecastSetupReview {
     }
 }
 
+function Select-ForecastComparisonReview {
+    # Lists every month-to-month change, so one the forecast didn't flag can
+    # be reviewed by hand. Returns its review, or $null to cancel.
+    param([Parameter(Mandatory)]$Session)
+    $changes = @($Session.Model.Comparisons.Items | Where-Object Status -EQ 'Defined')
+    Write-ForecastHeading -Title 'Month-to-month changes'
+    Write-FinOpsConsole ('  {0,3}  {1,-18} {2,9}  {3,-9}  {4}' -f '#', 'Months', 'Change', 'In growth', 'Decision') -ForegroundColor White
+    for ($i = 0; $i -lt $changes.Count; $i++) {
+        $change = $changes[$i]
+        $decision = if ($change.Review) { [string]$change.Review.Decision } else { '' }
+        Write-FinOpsConsole ('  {0,3}  {1,-18} {2,9}  {3,-9}  {4}' -f ($i + 1), "$($change.FromMonth) to $($change.ToMonth)", (Format-ForecastPercent $change.Change), $(if ($change.Retained) { 'yes' } else { 'no' }), $decision) -ForegroundColor $(if ($change.Flagged) { 'Yellow' } else { 'Gray' })
+    }
+    $answer = Read-ForecastText -Prompt 'Number of the change to review (blank to cancel)'
+    $number = 0
+    if (-not [int]::TryParse($answer, [ref]$number) -or $number -lt 1 -or $number -gt $changes.Count) { return $null }
+    $change = $changes[$number - 1]
+    if ($change.Review) { return $change.Review }
+    return New-ForecastComparisonReview -Comparison $change -ScopeKey $Session.Model.ScopeKey -Median $Session.Model.Comparisons.Median -Threshold $Session.Model.Comparisons.Threshold
+}
+
 function Show-ForecastExceptions {
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Session, [string]$Category)
     while ($true) {
@@ -171,9 +191,12 @@ function Show-ForecastExceptions {
             $c = $left.CompareTo($right)
             if ($c) { $c } else { [string]::CompareOrdinal([string]$a.Key, [string]$b.Key) }
         }
+        # A list filtered to one category, such as approving manual months, stays on it.
+        $changes = if ($Category) { 0 } else { @($Session.Model.Comparisons.Items | Where-Object Status -EQ 'Defined').Count }
         Clear-ForecastScreen
         Write-ForecastHeading -Title "Exceptions ($($ordered.Count))"
-        if ($ordered.Count -eq 0) { Write-FinOpsConsole '  Nothing to review.' -ForegroundColor Green; Wait-ForecastKey; return }
+        if ($ordered.Count -eq 0 -and $changes -eq 0) { Write-FinOpsConsole '  Nothing to review.' -ForegroundColor Green; Wait-ForecastKey; return }
+        if ($ordered.Count -eq 0) { Write-FinOpsConsole '  Nothing needs a decision.' -ForegroundColor Green }
         for ($i = 0; $i -lt $ordered.Count; $i++) {
             $item = $ordered[$i]
             $flag = if ($item.Decision -eq 'Pending') { if ($item.Required) { 'REQUIRED' } else { 'optional' } } else { $item.Decision }
@@ -181,14 +204,20 @@ function Show-ForecastExceptions {
             Write-FinOpsConsole ('  {0,3}  {1,-17} {2,-12} {3}' -f ($i + 1), $item.Category, $flag, (ConvertTo-ForecastSafeText $item.Title 80)) -ForegroundColor $color
         }
         Write-FinOpsConsole ''
-        $answer = Read-ForecastText -Prompt 'Number to review, or B to go back'
+        $answer = Read-ForecastText -Prompt $(if ($changes) { 'Number to review, C to review any month-to-month change, or B to go back' } else { 'Number to review, or B to go back' })
         if ($answer -eq '' -or $answer -match '^(?i)b$') { return }
-        $number = 0
-        if (-not [int]::TryParse($answer, [ref]$number) -or $number -lt 1 -or $number -gt $ordered.Count) { continue }
-        $item = $ordered[$number - 1]
+        if ($changes -and $answer -match '^(?i)c$') {
+            $item = Select-ForecastComparisonReview -Session $Session
+            if (-not $item) { continue }
+        }
+        else {
+            $number = 0
+            if (-not [int]::TryParse($answer, [ref]$number) -or $number -lt 1 -or $number -gt $ordered.Count) { continue }
+            $item = $ordered[$number - 1]
+        }
         Write-ForecastHeading -Title (ConvertTo-ForecastSafeText $item.Title 120)
         Write-FinOpsConsole "  $(ConvertTo-ForecastSafeText $item.Detail 1200)" -ForegroundColor Gray
-        if ($item.Stale) { Write-FinOpsConsole '  The data changed since the last decision, so it needs a new review.' -ForegroundColor Yellow }
+        if ($item.Stale) { Write-FinOpsConsole '  The data, or a decision it depends on, changed since the last decision, so it needs a new review.' -ForegroundColor Yellow }
         Write-FinOpsConsole "  Current decision: $($item.Decision)$(if ($item.Note) { " - $($item.Note)" })" -ForegroundColor DarkGray
         for ($o = 0; $o -lt @($item.Options).Count; $o++) {
             $suggested = if ($item.Options[$o] -eq $item.Suggested) { '  (suggested)' } else { '' }

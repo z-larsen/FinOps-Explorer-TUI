@@ -26,6 +26,8 @@ function Update-ForecastExportCache {
     $checkpoint = [Collections.Generic.List[object]]::new()
     $read = 0; $reused = 0; $incomplete = 0
     $notes = [Collections.Generic.List[string]]::new()
+    # Kept months the forecast needs that were read before they were final.
+    $unsettledMonths = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
     # Cost Details sources with a fromMonth of Auto read from here.
     $earliestMonth = ''
     try { $earliestMonth = Get-ForecastFirstNeededMonth -Settings $Settings -AsOf $Now }
@@ -83,6 +85,9 @@ function Update-ForecastExportCache {
                     $runTexts.Add([pscustomobject]@{ RunKey = $runKey; Text = $text })
                     $reused++
                 }
+                foreach ($month in @($retention.Unsettled)) {
+                    if (-not $earliestMonth -or [string]::CompareOrdinal($month, $earliestMonth) -ge 0) { [void]$unsettledMonths.Add($month) }
+                }
                 if (@($retention.Dropped).Count) {
                     $note = "$(ConvertTo-ForecastSafeText $source.label 80): $(@($retention.Dropped) -join ', ') can't be read again from Cost Details and were read before the tag key, migration boundary, or this source's settings changed, so they're no longer used."
                     $notes.Add($note)
@@ -92,6 +97,12 @@ function Update-ForecastExportCache {
         }
         Write-Progress -Id 82 -Activity 'Reading export runs' -Completed
         Write-Progress -Id 81 -Activity 'Refreshing export history' -Completed
+        if ($unsettledMonths.Count) {
+            $one = $unsettledMonths.Count -eq 1
+            $note = "Kept as provisional: $(@($unsettledMonths) -join ', '). $(if ($one) { 'It was' } else { 'They were' }) read less than $([int]$Settings.period.graceDays) days after the month ended, before $(if ($one) { 'it' } else { 'they' }) counted as final, and Cost Details can no longer return $(if ($one) { 'it' } else { 'them' })."
+            $notes.Add($note)
+            Write-Warning $note
+        }
         $meta = [pscustomobject]@{ refreshedUtc = $started.ToString('o', $script:ForecastInvariant); profileHash = $ingestProfile.Hash; runKeys = @($runTexts.RunKey); sourceIds = @($Settings.sources.id) }
         Publish-ForecastCache -Root $Root -RunTexts $runTexts.ToArray() -Meta $meta
         $entry = [pscustomobject]@{ AttemptUtc = $started.ToString('o', $script:ForecastInvariant); Result = 'Succeeded'; Error = $null; RunsRead = $read; RunsReused = $reused; DurationSeconds = [int]([datetime]::UtcNow - $started).TotalSeconds }

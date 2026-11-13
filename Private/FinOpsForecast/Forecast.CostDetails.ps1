@@ -141,17 +141,25 @@ function Get-ForecastCostDetailsRuns {
     return , @($runs)
 }
 
-function Test-ForecastCostDetailsFinal {
-    # A Complete whole-month read submitted at least the grace period after
-    # the month closed. Matches the Final rule in Select-ForecastRuns.
-    param([AllowNull()]$Cached, [Parameter(Mandatory)][string]$Month, [Parameter(Mandatory)][string]$ProfileHash, [int]$GraceDays = $script:ForecastDefaultGraceDays)
+function Test-ForecastCostDetailsWholeMonth {
+    # A Complete read of every day of the month, made after the month ended,
+    # under this profile.
+    param([AllowNull()]$Cached, [Parameter(Mandatory)][string]$Month, [Parameter(Mandatory)][string]$ProfileHash)
     if (-not $Cached -or [string]$Cached.Status -ne 'Complete' -or [string]$Cached.ProfileHash -ne $ProfileHash) { return $false }
     $submitted = ConvertFrom-ForecastDate -Value $Cached.Submitted
     $cachedStart = ConvertFrom-ForecastDate -Value $Cached.Start
     $cachedEnd = ConvertFrom-ForecastDate -Value $Cached.End
     if (-not $submitted -or -not $cachedStart -or -not $cachedEnd) { return $false }
     $monthEnd = Get-ForecastMonthEnd -MonthKey $Month
-    return $cachedStart.Date -eq (Get-ForecastMonthStart -MonthKey $Month) -and $cachedEnd.Date -ge $monthEnd.AddDays(-1).Date -and $submitted -ge $monthEnd.AddDays($GraceDays)
+    return $cachedStart.Date -eq (Get-ForecastMonthStart -MonthKey $Month) -and $cachedEnd.Date -ge $monthEnd.AddDays(-1).Date -and $submitted -ge $monthEnd
+}
+
+function Test-ForecastCostDetailsFinal {
+    # A whole-month read submitted at least the grace period after the month
+    # closed. Matches the Final rule in Select-ForecastRuns.
+    param([AllowNull()]$Cached, [Parameter(Mandatory)][string]$Month, [Parameter(Mandatory)][string]$ProfileHash, [int]$GraceDays = $script:ForecastDefaultGraceDays)
+    if (-not (Test-ForecastCostDetailsWholeMonth -Cached $Cached -Month $Month -ProfileHash $ProfileHash)) { return $false }
+    return (ConvertFrom-ForecastDate -Value $Cached.Submitted) -ge (Get-ForecastMonthEnd -MonthKey $Month).AddDays($GraceDays)
 }
 
 function Test-ForecastCostDetailsReuse {
@@ -176,14 +184,17 @@ function Test-ForecastCostDetailsReuse {
 }
 
 function Get-ForecastCostDetailsRetainedKeys {
-    # Final months this source read earlier that the API can no longer reach.
-    # Until last month passes its grace period, the forecast window still
-    # starts one month beyond that reach, so these months stay in the cache.
-    # Months outside the source's fromMonth and toMonth aren't kept; with a
-    # fromMonth of Auto, earlier final months are, so lowering the lookback
-    # and raising it again doesn't lose months the API can't return. Dropped
-    # counts final months that were read under a different tag key, boundary,
-    # or source setting; they can't be read again.
+    # Whole months this source read earlier but no longer requests, such as
+    # months the API can no longer reach. Until last month passes its grace
+    # period, the forecast window still starts one month beyond that reach,
+    # so these months stay in the cache. Months outside the source's
+    # fromMonth and toMonth aren't kept; with a fromMonth of Auto, earlier
+    # months are, so lowering the lookback and raising it again doesn't lose
+    # months the API can't return. A month read before its grace period
+    # ended may be the only copy left, so it's kept too, but it stays
+    # provisional; Unsettled lists those months. Dropped lists whole months
+    # read under a different tag key, boundary, or source setting; they
+    # can't be read again.
     param(
         [Parameter(Mandatory)]$Source,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Runs,
@@ -198,6 +209,7 @@ function Get-ForecastCostDetailsRetainedKeys {
     $to = [string]$Source.toMonth
     $keys = [Collections.Generic.List[string]]::new()
     $dropped = [Collections.Generic.List[string]]::new()
+    $unsettled = [Collections.Generic.List[string]]::new()
     foreach ($record in $Cached) {
         if (-not $record -or $planned.Contains([string]$record.RunKey)) { continue }
         if ([string]$record.SourceId -ne [string]$Source.id -or [string]$record.OriginalScope -ne $scope.Key -or [string]$record.RunId -notlike 'costdetails:*') { continue }
@@ -207,10 +219,13 @@ function Get-ForecastCostDetailsRetainedKeys {
         if ([string]$record.RunKey -ne (Get-ForecastHash -Text "$($Source.id)|costdetails|$($scope.Key)|$month")) { continue }
         if ((Test-ForecastMonthKey -MonthKey $from) -and [string]::CompareOrdinal($month, $from) -lt 0) { continue }
         if ((Test-ForecastMonthKey -MonthKey $to) -and [string]::CompareOrdinal($month, $to) -gt 0) { continue }
-        if (Test-ForecastCostDetailsFinal -Cached $record -Month $month -ProfileHash $ProfileHash -GraceDays $GraceDays) { $keys.Add([string]$record.RunKey) }
-        elseif (Test-ForecastCostDetailsFinal -Cached $record -Month $month -ProfileHash ([string]$record.ProfileHash) -GraceDays $GraceDays) { $dropped.Add($month) }
+        $recordProfile = [string]$record.ProfileHash
+        if (-not $recordProfile -or -not (Test-ForecastCostDetailsWholeMonth -Cached $record -Month $month -ProfileHash $recordProfile)) { continue }
+        if ($recordProfile -ne $ProfileHash) { $dropped.Add($month); continue }
+        $keys.Add([string]$record.RunKey)
+        if (-not (Test-ForecastCostDetailsFinal -Cached $record -Month $month -ProfileHash $ProfileHash -GraceDays $GraceDays)) { $unsettled.Add($month) }
     }
-    return [pscustomobject]@{ Keys = $keys.ToArray(); Dropped = @($dropped | Sort-Object) }
+    return [pscustomobject]@{ Keys = $keys.ToArray(); Dropped = @($dropped | Sort-Object); Unsettled = @($unsettled | Sort-Object) }
 }
 
 # -- Requests ----------------------------------------------------------------

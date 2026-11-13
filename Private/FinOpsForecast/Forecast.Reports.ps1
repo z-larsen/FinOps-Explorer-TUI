@@ -55,9 +55,10 @@ function Get-ForecastDisclosure {
         $lines.Add("- PRELIMINARY: only $($Settings.period.lookbackMonths) months of history ($([int]$Settings.period.lookbackMonths - 1) month-to-month changes) were used. Growth and its range rest on very few observations, so treat this as an early indication, not a forecast to commit to. A Ready forecast needs $($script:ForecastReadyMonths) months.")
     }
     $lines.Add('- Each month is normalized to a 30-day run rate: cost / days in month x 30, using Usage charges. Unused reservation and savings plan charges appear only in amortized cost, which isn''t accepted.')
-    $lines.Add("- $($comparisons.Expected) adjacent-month comparisons; $(@($comparisons.Items | Where-Object Retained).Count) retained, $(@($comparisons.Items | Where-Object Status -EQ 'Undefined').Count) undefined, $(@($comparisons.Items | Where-Object Flagged).Count) flagged.")
+    $byHand = @($comparisons.Items | Where-Object { -not $_.Flagged -and $_.Review -and $_.Review.Category -eq 'Comparison' }).Count
+    $lines.Add("- $($comparisons.Expected) adjacent-month comparisons; $(@($comparisons.Items | Where-Object Retained).Count) retained, $(@($comparisons.Items | Where-Object Status -EQ 'Undefined').Count) undefined, $(@($comparisons.Items | Where-Object Flagged).Count) flagged$(if ($byHand) { ", $byHand reviewed by hand" }).")
     $lines.Add("- Flag rule: |change - median| > max($(Format-ForecastDecimal $comparisons.K) x scaled MAD, $(Format-ForecastPercent $comparisons.MinimumDeviation)). Median $(Format-ForecastPercent $comparisons.Median); threshold $(Format-ForecastPercent $comparisons.Threshold).")
-    foreach ($item in @($comparisons.Items | Where-Object { $_.Status -ne 'Defined' -or $_.Flagged })) {
+    foreach ($item in @($comparisons.Items | Where-Object { $_.Status -ne 'Defined' -or $_.Flagged -or $_.Review })) {
         $decision = if ($item.Review) { $item.Review.Decision } else { 'n/a' }
         $note = if ($item.Review -and $item.Review.Note) { " Note: $($item.Review.Note)" } else { '' }
         $lines.Add("  - $($item.FromMonth) to $($item.ToMonth): $($item.Status), change $(Format-ForecastPercent $item.Change), decision $decision, retained $($item.Retained).$note")

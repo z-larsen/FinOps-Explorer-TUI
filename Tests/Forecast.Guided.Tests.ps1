@@ -471,6 +471,28 @@ Describe 'How it works on the review page' {
         ($script:Console -join "`n") | Should -Match 'Live, at the billing account\n: not checked yet'
     }
 
+    It 'Estimates the read in use from the workspace''s own sources' {
+        # One-day reports for five subscriptions, from 2025-11 through November 9.
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root } {
+            $settings = Get-ForecastStoredSettings -Root $Root
+            foreach ($source in $settings.sources) { $source.chunkDays = 1 }
+            Save-ForecastStoredSettings -Root $Root -Settings $settings
+        }
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Show-ForecastHowItWorks -Root $Root -AsOf $AsOf }
+        ($script:Console -join "`n") | Should -Match 'First read 1870 reports, about 18 hours; each later refresh 150 to 300, about 1\.5 to 3 hours\.'
+    }
+
+    It 'Shows a billing account the workspace reads as in use, even for a few subscriptions' {
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root } {
+            $settings = Get-ForecastStoredSettings -Root $Root
+            $settings.scope.subscriptionIds = @($settings.scope.subscriptionIds | Select-Object -First 2)
+            $settings.sources = @([pscustomobject]@{ id = 'live-billing'; kind = 'CostDetails'; label = 'Synthetic MCA (live)'; scope = '/providers/Microsoft.Billing/billingAccounts/aaaa:bbbb_2019-05-31'; chunkDays = 7; fromMonth = 'Auto'; toMonth = ''; storageResourceId = ''; container = ''; prefix = ''; path = ''; agreement = 'MCA' })
+            Save-ForecastStoredSettings -Root $Root -Settings $settings
+        }
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; AsOf = $script:AsOf } { Show-ForecastHowItWorks -Root $Root -AsOf $AsOf }
+        ($script:Console -join "`n") | Should -Match 'Live, at the billing account\n: available: Synthetic MCA \(MCA\)\n \(in use\)'
+    }
+
     It 'Opens from the review page with H' {
         Mock Invoke-ForecastEvaluation -ModuleName FinOpsForecast { throw 'Synthetic evaluation failure.' }
         Mock Show-ForecastHowItWorks -ModuleName FinOpsForecast { }

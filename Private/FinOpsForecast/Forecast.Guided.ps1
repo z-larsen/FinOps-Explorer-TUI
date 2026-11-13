@@ -248,6 +248,36 @@ function Get-ForecastReportSeconds {
     return $script:ForecastBillingReportSeconds
 }
 
+function Test-ForecastSourceCoversMonth {
+    # Whether a source's first and last months include this month.
+    param([Parameter(Mandatory)]$Source, [Parameter(Mandatory)][string]$Month)
+    $from = [string]$Source.fromMonth
+    $to = [string]$Source.toMonth
+    if ((Test-ForecastMonthKey -MonthKey $from) -and [string]::CompareOrdinal($Month, $from) -lt 0) { return $false }
+    return -not ((Test-ForecastMonthKey -MonthKey $to) -and [string]::CompareOrdinal($Month, $to) -gt 0)
+}
+
+function Get-ForecastConfiguredReadEstimate {
+    # Reports and rough time for Cost Details sources as they're set up:
+    # their own months and days per report. A later refresh reads this
+    # month, plus last month until it's final.
+    param([Parameter(Mandatory)][object[]]$Sources, [Parameter(Mandatory)][string]$EarliestMonth, [Parameter(Mandatory)][datetime]$AsOf)
+    $first = Get-ForecastGuidedRequestEstimate -Sources $Sources -AsOf $AsOf -EarliestMonth $EarliestMonth
+    $current = ConvertTo-ForecastMonthKey -Date (ConvertFrom-ForecastDate -Value $AsOf)
+    $previous = Add-ForecastMonth -MonthKey $current -Count -1
+    $low = 0; $high = 0; $lowSeconds = 0; $highSeconds = 0
+    foreach ($source in $Sources) {
+        $perMonth = [int][math]::Ceiling(30 / (Get-ForecastCostDetailsChunkDays -Source $source))
+        $seconds = $perMonth * (Get-ForecastReportSeconds -Source $source)
+        if (Test-ForecastSourceCoversMonth -Source $source -Month $current) { $low += $perMonth; $high += $perMonth; $lowSeconds += $seconds; $highSeconds += $seconds }
+        if (Test-ForecastSourceCoversMonth -Source $source -Month $previous) { $high += $perMonth; $highSeconds += $seconds }
+    }
+    $later = if ($high -eq 0) { 'no reports' }
+    elseif ($low -eq $high) { "$low report$(if ($low -ne 1) { 's' }), $(Format-ForecastDuration $lowSeconds)" }
+    else { "$low to $high, $(Format-ForecastDuration $lowSeconds -UpToSeconds $highSeconds)" }
+    [pscustomobject]@{ Reports = $first.Count; Seconds = $first.Seconds; FirstRead = "$($first.Count) report$(if ($first.Count -ne 1) { 's' }), $(Format-ForecastDuration $first.Seconds)"; Later = $later }
+}
+
 function Get-ForecastLiveReportCount {
     # The months a live read covers from EarliestMonth (only as far back as
     # Cost Management reaches), and the weekly reports they need at a
@@ -299,15 +329,22 @@ function Get-ForecastReadEstimate {
     # each later refresh. BillingCheck is $null when the billing account
     # wasn't checked; its Accounts are empty when this sign-in can't read
     # one. The billing account is only an option for more subscriptions than
-    # ForecastGuidedSubscriptionLimit. Recommendation is set for more than
-    # the minimum lookback.
+    # ForecastGuidedSubscriptionLimit, or when a source already reads one.
+    # Sources are the workspace's own; a live read they already set up is
+    # estimated from their months and days per report. Recommendation is set
+    # for more than the minimum lookback.
     param(
         [Parameter(Mandatory)][int]$SubscriptionCount,
         [Parameter(Mandatory)][int]$LookbackMonths,
         [Parameter(Mandatory)][string]$EarliestMonth,
         [Parameter(Mandatory)][datetime]$AsOf,
-        [AllowNull()]$BillingCheck
+        [AllowNull()]$BillingCheck,
+        [AllowEmptyCollection()][object[]]$Sources = @()
     )
+    $configured = @{ Billing = [Collections.Generic.List[object]]::new(); Subscriptions = [Collections.Generic.List[object]]::new() }
+    foreach ($source in @($Sources | Where-Object { $_ -and [string]$_.kind -eq 'CostDetails' })) {
+        $configured[$(if ([string]$source.scope -like '/subscriptions/*') { 'Subscriptions' } else { 'Billing' })].Add($source)
+    }
     $counts = Get-ForecastLiveReportCount -EarliestMonth $EarliestMonth -AsOf $AsOf
     $reach = if ($LookbackMonths -gt $script:ForecastReadyMonths) { " Live reads reach back $($script:ForecastReadyMonths) months." } else { '' }
     $exports = [pscustomobject]@{
@@ -316,7 +353,7 @@ function Get-ForecastReadEstimate {
         Needs = "Needs exports that cover $EarliestMonth on, and Storage Blob Data Reader or a local copy."
     }
     $live = [Collections.Generic.List[object]]::new()
-    if ($SubscriptionCount -gt $script:ForecastGuidedSubscriptionLimit) {
+    if ($SubscriptionCount -gt $script:ForecastGuidedSubscriptionLimit -or $configured.Billing.Count) {
         $accounts = if ($null -ne $BillingCheck) { @($BillingCheck.Accounts | Where-Object { $_ }) } else { @() }
         $available = if ($null -eq $BillingCheck) { $null } else { $accounts.Count -gt 0 }
         $status = if ($null -eq $available) { 'not checked yet; guided setup (G) checks it' } elseif ($available) { "available: $(ConvertTo-ForecastSafeText ([string]$accounts[0].Name) 60) ($($accounts[0].Agreement))" } else { 'not available with this sign-in' }
@@ -337,6 +374,16 @@ function Get-ForecastReadEstimate {
             Later = "$SubscriptionCount to $(2 * $SubscriptionCount), $(Format-ForecastDuration ($SubscriptionCount * $script:ForecastSubscriptionReportSeconds) -UpToSeconds (2 * $SubscriptionCount * $script:ForecastSubscriptionReportSeconds))"
             Needs = "Needs Cost Management Reader on each subscription (EA or MCA only).$reach"
         })
+    # A live read the workspace already has uses its own months and days per report.
+    foreach ($option in $live) {
+        $own = @($configured[$option.Key])
+        if ($own.Count -eq 0) { continue }
+        $estimate = Get-ForecastConfiguredReadEstimate -Sources $own -EarliestMonth $EarliestMonth -AsOf $AsOf
+        $option.Reports = $estimate.Reports
+        $option.Seconds = $estimate.Seconds
+        $option.FirstRead = $estimate.FirstRead
+        $option.Later = $estimate.Later
+    }
     $ordered = @($live | Sort-Object -Property Seconds -Stable)
     $recommendation = ''
     if ($LookbackMonths -gt $script:ForecastMinimumLookbackMonths) {
@@ -352,7 +399,8 @@ function Get-ForecastReadEstimate {
 
 function Write-ForecastHowItWorks {
     # How the forecast is built, then each way to read the history, fastest
-    # first. InUse marks the ways this workspace already reads.
+    # first. InUse marks the ways this workspace already reads, and Sources
+    # are its own, so a live read in use is estimated as it's set up.
     param(
         [Parameter(Mandatory)]$Settings,
         [Parameter(Mandatory)][int]$SubscriptionCount,
@@ -360,6 +408,7 @@ function Write-ForecastHowItWorks {
         [Parameter(Mandatory)][datetime]$AsOf,
         [AllowNull()]$BillingCheck,
         [string[]]$InUse = @(),
+        [AllowEmptyCollection()][object[]]$Sources = @(),
         [switch]$Guided
     )
     $guide = if (Test-Path -LiteralPath $script:ForecastGuidePath) { $script:ForecastGuidePath } else { 'docs\forecast.md in the FinOps Explorer folder' }
@@ -375,7 +424,7 @@ function Write-ForecastHowItWorks {
         Write-FinOpsConsole '  Time estimates need the subscriptions in 2 Scope.' -ForegroundColor DarkGray
         return
     }
-    $estimate = Get-ForecastReadEstimate -SubscriptionCount $SubscriptionCount -LookbackMonths ([int]$Settings.period.lookbackMonths) -EarliestMonth $EarliestMonth -AsOf $AsOf -BillingCheck $BillingCheck
+    $estimate = Get-ForecastReadEstimate -SubscriptionCount $SubscriptionCount -LookbackMonths ([int]$Settings.period.lookbackMonths) -EarliestMonth $EarliestMonth -AsOf $AsOf -BillingCheck $BillingCheck -Sources $Sources
     $options = @($estimate.Options)
     Write-FinOpsConsole "  How long reading the history takes, fastest first ($SubscriptionCount subscription$(if ($SubscriptionCount -ne 1) { 's' }), from $EarliestMonth)" -ForegroundColor White
     for ($i = 0; $i -lt $options.Count; $i++) {
@@ -411,7 +460,7 @@ function Show-ForecastHowItWorks {
     Write-ForecastHeading -Title 'How the forecast works'
     if ($settings.scope.label) { Write-FinOpsConsole "  Forecasting: $(ConvertTo-ForecastSafeText ([string]$settings.scope.label) 120)" -ForegroundColor Cyan }
     Write-FinOpsConsole ''
-    Write-ForecastHowItWorks -Settings $settings -SubscriptionCount $ids.Count -EarliestMonth (Get-ForecastFirstNeededMonth -Settings $settings -AsOf $AsOf) -AsOf $AsOf -BillingCheck $billingCheck -InUse (Get-ForecastReadApproach -Settings $settings)
+    Write-ForecastHowItWorks -Settings $settings -SubscriptionCount $ids.Count -EarliestMonth (Get-ForecastFirstNeededMonth -Settings $settings -AsOf $AsOf) -AsOf $AsOf -BillingCheck $billingCheck -InUse (Get-ForecastReadApproach -Settings $settings) -Sources @($settings.sources)
     Wait-ForecastKey
 }
 

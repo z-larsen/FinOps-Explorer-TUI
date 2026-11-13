@@ -15,7 +15,8 @@ param()
 # - eligible: Complete (manifest verified) or a legacy run a reviewer approved
 # - selected: the eligible run submitted last
 # - final:    submitted at least the grace period after the month ended
-#             (usage can change until the fifth day after a month ends)
+#             (usage can change until the fifth day after a month ends,
+#             when a daily export writes its last copy of that month)
 # A newer corrected run replaces the earlier one on the next refresh, so the
 # result is the same however many times it runs. A newer run that's
 # incomplete never displaces an older complete one.

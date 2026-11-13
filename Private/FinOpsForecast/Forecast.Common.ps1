@@ -173,7 +173,8 @@ function Get-ForecastMonthEnd {
 function Get-ForecastLastEligibleMonth {
     # The latest month that has closed and passed the finalization grace
     # period as of AsOf. Usage can change until the fifth day after a month
-    # ends, so the default grace is five days (ForecastDefaultGraceDays).
+    # ends, so by default a month is final from 00:00 UTC on that day, four
+    # days after it ends (ForecastDefaultGraceDays).
     param([Parameter(Mandatory)][datetime]$AsOf, [int]$GraceDays = $script:ForecastDefaultGraceDays)
     $asOfUtc = ConvertFrom-ForecastDate -Value $AsOf
     $candidate = ConvertTo-ForecastMonthKey -Date $asOfUtc

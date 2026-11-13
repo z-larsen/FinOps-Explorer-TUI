@@ -489,6 +489,37 @@ Describe 'Cost Details refresh' {
         }
     }
 
+    It 'Keeps a whole month read before it was final when Cost Details can no longer return it, as provisional' {
+        # Read on December 4 under the earlier three-day grace, November 2025 counted as final; under four days it doesn't.
+        $settings = New-CostDetailsSettings -Sources @(New-CostDetailsSource -ChunkDays 31)
+        $settings.period.graceDays = 3
+        $read = [datetime]::SpecifyKind([datetime]'2025-12-04T12:00:00', [DateTimeKind]::Utc)
+        $year = [datetime]::SpecifyKind([datetime]'2026-12-03T12:00:00', [DateTimeKind]::Utc)
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; Settings = $settings; Read = $read; Year = $year } {
+            (Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Read).Error | Should -BeNullOrEmpty
+            # A year later the window starts at 2025-11, which the API can no longer return.
+            $Settings.period.graceDays = 4
+            $refresh = Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Year -WarningAction SilentlyContinue
+            $refresh.Error | Should -BeNullOrEmpty
+            @($refresh.Notes) -join ' ' | Should -BeLike '*Kept as provisional: 2025-11.*can no longer return it*'
+            @((Get-ForecastCache -Root $Root).Results | Where-Object { $_.Months -contains '2025-11' }).Count | Should -Be 1
+            $november = @((Get-ForecastDataset -Root $Root -Settings $Settings -Reviews @{}).Months | Where-Object Month -EQ '2025-11')[0]
+            $november.Status | Should -Be 'Provisional'
+            $november.RunRate | Should -Be 300
+            $november.Note | Should -Match 'before it counted as final'
+            # The copy itself is intact: under three days it's final again.
+            $Settings.period.graceDays = 3
+            @((Get-ForecastDataset -Root $Root -Settings $Settings -Reviews @{}).Months | Where-Object Month -EQ '2025-11')[0].Status | Should -Be 'Complete'
+
+            # A new tag key changes its content, so it's dropped, with a warning.
+            $Settings.period.graceDays = 4
+            $Settings.workloads.tagKey = 'costcenter'
+            $retagged = Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Year -WarningAction SilentlyContinue
+            @($retagged.Notes) -join ' ' | Should -BeLike '*2025-11*no longer used*'
+            @((Get-ForecastCache -Root $Root).Results | Where-Object { $_.Months -contains '2025-11' }).Count | Should -Be 0
+        }
+    }
+
     It 'Never writes report links to the workspace or messages' {
         $settings = New-CostDetailsSettings -Sources @(New-CostDetailsSource -From '2026-09')
         $script:Api.GetStatus['20260915'] = 500
