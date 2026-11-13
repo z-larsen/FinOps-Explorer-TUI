@@ -23,7 +23,7 @@ replace their ingestion pipelines or monitor the environment between runs.
 
 ## Startup screen
 
-![FinOps Explorer TUI startup and tenant picker with fictional account and tenant details.](docs/images/finops-multitool-startup.png)
+![FinOps Explorer TUI startup with the banner, the mode prompt, and a tenant picker that lists tenants by name, using fictional account and tenant details.](docs/images/finops-multitool-startup.png)
 
 ## Workflow
 
