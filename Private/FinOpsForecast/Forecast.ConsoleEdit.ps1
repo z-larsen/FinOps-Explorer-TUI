@@ -57,6 +57,34 @@ function Read-ForecastLocalSource {
     return $source
 }
 
+function Remove-ForecastUnreadableSources {
+    # Lists the live sources Cost Details turned down for their offer type
+    # and, once confirmed, removes them and their subscriptions from the scope.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Settings)
+    Write-FinOpsConsole '  Checking the last refresh...' -ForegroundColor DarkGray
+    $cache = $null
+    try { $cache = Get-ForecastCache -Root $Root }
+    catch { Write-FinOpsConsole "  ! The last refresh couldn't be read: $(ConvertTo-ForecastSafeText $_.Exception.Message 200)" -ForegroundColor Yellow; return }
+    $unreadable = @(Get-ForecastUnreadableSources -Settings $Settings -Results @(if ($cache) { $cache.Results }))
+    if (-not $unreadable.Count) { Write-FinOpsConsole '  The last refresh didn''t turn down any live source for its offer type.' -ForegroundColor DarkGray; return }
+    Write-FinOpsConsole "  Cost Details reads only EA and MCA subscriptions, so the last refresh couldn't read these $($unreadable.Count):"
+    foreach ($item in $unreadable) { Write-FinOpsConsole "    $($item.Name)  (offer type $($item.Offer))" }
+    if (-not (Read-ForecastYesNo -Prompt 'Remove their live sources and take them out of the scope?')) { return }
+    $sourceIds = @($unreadable | ForEach-Object { [string]$_.Source.id })
+    $subscriptionIds = @($unreadable | ForEach-Object SubscriptionId | Where-Object { $_ })
+    $before = @($Settings.scope.subscriptionIds).Count
+    $Settings.sources = @($Settings.sources | Where-Object { [string]$_.id -notin $sourceIds })
+    $Settings.scope.subscriptionIds = @($Settings.scope.subscriptionIds | Where-Object { (ConvertTo-ForecastSubscriptionId -Value ([string]$_)) -notin $subscriptionIds })
+    $remaining = @($Settings.scope.subscriptionIds)
+    # A label from guided setup ("<name> and N more subscriptions") would still count the removed ones.
+    if ($remaining.Count -and $remaining.Count -lt $before -and [string]$Settings.scope.label -match "^.+ and $($before - 1) more subscriptions?$") {
+        $named = @($remaining | ForEach-Object { [pscustomobject]@{ Name = Get-ForecastLiveSourceName -SubscriptionId (ConvertTo-ForecastSubscriptionId -Value ([string]$_)) -Settings $Settings } })
+        if ($named[0].Name) { $Settings.scope.label = Get-ForecastGuidedScopeLabel -Subscriptions $named }
+    }
+    Save-ForecastSettingsWithFeedback -Root $Root -Settings $Settings
+    Write-FinOpsConsole "  Removed $($sourceIds.Count) live source(s)$(if ($remaining.Count -lt $before) { " and $($before - $remaining.Count) subscription(s) from the scope" }). Refresh to bring the workspace up to date; months already read are kept." -ForegroundColor Cyan
+}
+
 function Edit-ForecastSources {
     param([Parameter(Mandatory)][string]$Root)
     while ($true) {
@@ -81,9 +109,12 @@ function Edit-ForecastSources {
         Write-FinOpsConsole ''
         Write-FinOpsConsole '  D Discover exports in Azure   A Add storage location   L Add local folder   C Add Cost Details (live)' -ForegroundColor DarkGray
         Write-FinOpsConsole '  E Edit   X Remove   M Switch between exports and manual inputs   T Set migration boundary   B Back' -ForegroundColor DarkGray
-        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid @('D', 'A', 'L', 'C', 'E', 'X', 'M', 'T', 'B') -Default 'B'
+        $live = @($sources | Where-Object { [string]$_.kind -eq 'CostDetails' }).Count -gt 0
+        if ($live) { Write-FinOpsConsole '  U Remove live sources Cost Details can''t read, such as Visual Studio subscriptions' -ForegroundColor DarkGray }
+        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid (@('D', 'A', 'L', 'C', 'E', 'X', 'M', 'T', 'B') + @(if ($live) { 'U' })) -Default 'B'
         switch ($choice) {
             'D' { Add-ForecastDiscoveredSources -Root $Root }
+            'U' { Remove-ForecastUnreadableSources -Root $Root -Settings $settings; Wait-ForecastKey }
             'A' {
                 $source = Read-ForecastStorageSource
                 if (-not $source) { Wait-ForecastKey; continue }

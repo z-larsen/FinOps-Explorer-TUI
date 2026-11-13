@@ -46,16 +46,21 @@ function Format-ForecastScopeIssues {
     return "$(@($lines) -join ' ')$(if ($hidden) { " (and $hidden more issue(s))" })"
 }
 
+function Get-ForecastLiveSourceName {
+    # The name a live source gives its subscription, without " (live)".
+    param([Parameter(Mandatory)][string]$SubscriptionId, $Settings)
+    foreach ($source in @($Settings.sources | Where-Object { $_ -and [string]$_.kind -eq 'CostDetails' })) {
+        if ((ConvertTo-ForecastSubscriptionId -Value ([string]$source.scope)) -eq $SubscriptionId -and $source.label) { return ([string]$source.label) -replace '\s*\(live\)$', '' }
+    }
+    return ''
+}
+
 function Get-ForecastScopeSubscriptionName {
     # A subscription's name from its cost rows, or else from the live source
     # that reads it; a subscription that couldn't be read has no rows.
     param([Parameter(Mandatory)][string]$SubscriptionId, $Dataset, $Settings)
     $name = [string]$Dataset.SubscriptionNames[$SubscriptionId]
-    if (-not $name) {
-        foreach ($source in @($Settings.sources | Where-Object { $_ -and [string]$_.kind -eq 'CostDetails' })) {
-            if ((ConvertTo-ForecastSubscriptionId -Value ([string]$source.scope)) -eq $SubscriptionId -and $source.label) { $name = ([string]$source.label) -replace '\s*\(live\)$', ''; break }
-        }
-    }
+    if (-not $name) { $name = Get-ForecastLiveSourceName -SubscriptionId $SubscriptionId -Settings $Settings }
     if ($name) { return "$(ConvertTo-ForecastSafeText $name 60) ($SubscriptionId)" }
     return $SubscriptionId
 }

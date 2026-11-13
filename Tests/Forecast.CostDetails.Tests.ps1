@@ -68,9 +68,10 @@ BeforeAll {
                 return [pscustomobject]@{ StatusCode = $script:Api.PostStatus[$key]; Content = '{"error":{"code":"SyntheticError","message":"Synthetic request failure"}}'; Headers = @{ 'Retry-After' = @('600') } }
             }
             $scope = $Path.Substring(0, $Path.IndexOf('/providers/Microsoft.CostManagement/'))
-            # Fails every request for one scope with the given status and error body.
+            # Fails requests for one scope with the given status and error body,
+            # from an optional chunk start (yyyyMMdd) on.
             $failure = $script:Api.ScopeFailure[$scope.ToLowerInvariant()]
-            if ($failure) { return [pscustomobject]@{ StatusCode = $failure.Status; Content = $failure.Content; Headers = @{} } }
+            if ($failure -and (-not $failure.From -or [string]::CompareOrdinal($key, $failure.From) -ge 0)) { return [pscustomobject]@{ StatusCode = $failure.Status; Content = $failure.Content; Headers = @{} } }
             $id = '{0:D8}-0000-0000-0000-000000000000' -f $script:Api.Next++
             $script:Api.Operations[$id] = @{ Scope = $scope; Start = $start; End = $end; Key = $key; Polled = 0 }
             $location = if ($script:Api.Location) { $script:Api.Location } else { "https://management.azure.com$scope/providers/Microsoft.CostManagement/costDetailsOperationResults/$id`?api-version=2025-03-01" }
@@ -282,7 +283,7 @@ Describe 'Cost Details requests' {
             Expected = 'The Cost Details report for 2026-07-01 to 2026-07-07 failed (HTTP 400): Invalid time period. Check the scope, and that the dates are within the last 13 months.'
         }
         @{ Case = 'Visual Studio offer'; Status = 422; Body = '{"error":{"code":"422","message":"Unsupported request. offer type: WebDirect for get detailed report request is not supported.Unsupported request. offer type: WebDirect for get detailed report request is not supported."}}'
-            Expected = 'The Cost Details report for 2026-07-01 to 2026-07-07 failed (HTTP 422): Cost Details reads only EA and MCA subscriptions, and this one''s offer type is WebDirect. Remove its live source in 1 Source.'
+            Expected = 'The Cost Details report for 2026-07-01 to 2026-07-07 failed (HTTP 422): Cost Details reads only EA and MCA subscriptions, and this one''s offer type is WebDirect. Remove it with U in 1 Source.'
         }
     ) {
         $script:Api.ScopeFailure[$script:SubScope.ToLowerInvariant()] = @{ Status = $Status; Content = $Body }
@@ -442,9 +443,46 @@ Describe 'Cost Details refresh' {
         $source = @($checks | Where-Object Id -EQ 'SOURCE')[0]
         $source.Status | Should -Be 'Fail'
         ([regex]::Matches($source.Detail, 'No complete, approved run covers')).Count | Should -Be 1
-        $source.Detail | Should -Match 'offer type is WebDirect\. Remove its live source in 1 Source\.'
+        $source.Detail | Should -Match 'offer type is WebDirect\. Remove it with U in 1 Source\.'
         $source.Detail | Should -Match 'The same applies to (\d{4}-\d{2}, ){11}2026-11\.$'
         @($checks | Where-Object Id -EQ 'POPULATION')[0].Detail | Should -Match "sub-synth-b \($($script:SyntheticSubscriptions.B)\) has no run-rate data in the window"
+    }
+
+    It 'Removes only the live sources Cost Details turned down for their offer type with U in 1 Source' {
+        # B is always turned down, C lacks access, and D was read until October.
+        $d = '44444444-4444-4444-4444-444444444444'
+        $unsupported = '{"error":{"code":"422","message":"Unsupported request. offer type: WebDirect for get detailed report request is not supported."}}'
+        $script:Api.ScopeFailure["/subscriptions/$($script:SyntheticSubscriptions.B)"] = @{ Status = 422; Content = $unsupported }
+        $script:Api.ScopeFailure["/subscriptions/$($script:SyntheticSubscriptions.C)"] = @{ Status = 403; Content = '{"error":{"code":"AuthorizationFailed","message":"Synthetic access failure."}}' }
+        $script:Api.ScopeFailure["/subscriptions/$d"] = @{ Status = 422; Content = $unsupported; From = '20261001' }
+        $sources = @(
+            New-CostDetailsSource -ChunkDays 31
+            New-CostDetailsSource -Id 'src-b' -Scope "/subscriptions/$($script:SyntheticSubscriptions.B)" -ChunkDays 31
+            New-CostDetailsSource -Id 'src-c' -Scope "/subscriptions/$($script:SyntheticSubscriptions.C)" -ChunkDays 31
+            New-CostDetailsSource -Id 'src-d' -Scope "/subscriptions/$d" -ChunkDays 31
+        )
+        $names = 'a', 'b', 'c', 'd'
+        for ($i = 0; $i -lt $sources.Count; $i++) { $sources[$i].label = "sub-synth-$($names[$i]) (live)" }
+        $settings = New-CostDetailsSettings -Sources $sources
+        $settings.scope.subscriptionIds = @($script:SyntheticSubscriptions.A, $script:SyntheticSubscriptions.B, $script:SyntheticSubscriptions.C, $d)
+        $settings.scope.label = 'sub-synth-a and 3 more subscriptions'
+        $script:Answers = [Collections.Generic.Queue[string]]::new([string[]]@('U', 'Y', '', 'B'))
+        $script:Console = [Collections.Generic.List[string]]::new()
+        Mock Read-FinOpsAnswer -ModuleName FinOpsForecast { if ($script:Answers.Count) { $script:Answers.Dequeue() } else { '' } }
+        Mock Write-FinOpsConsole -ModuleName FinOpsForecast { $script:Console.Add([string]$Object) }
+        Mock Clear-Host -ModuleName FinOpsForecast { }
+        $saved = InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; Settings = $settings; Now = $script:Now } {
+            Save-ForecastStoredSettings -Root $Root -Settings $Settings
+            $null = Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Now
+            Edit-ForecastSources -Root $Root
+            Get-ForecastStoredSettings -Root $Root
+        }
+        $script:Answers.Count | Should -Be 0
+        $script:Console | Should -Contain '    sub-synth-b  (offer type WebDirect)'
+        @($script:Console | Where-Object { $_ -like '*(offer type*' }).Count | Should -Be 1
+        ($saved.sources.id -join ', ') | Should -Be 'src-cd, src-c, src-d'
+        ($saved.scope.subscriptionIds -join ', ') | Should -Be "$($script:SyntheticSubscriptions.A), $($script:SyntheticSubscriptions.C), $d"
+        $saved.scope.label | Should -Be 'sub-synth-a and 2 more subscriptions'
     }
 
     It 'Reads earlier months when the lookback grows or the fiscal year starts before it, with fromMonth Auto' {

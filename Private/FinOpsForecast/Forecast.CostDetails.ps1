@@ -287,7 +287,7 @@ function Get-ForecastCostDetailsFailure {
     # Cost Details reads EA and MCA subscriptions only. Other offers, such as
     # pay-as-you-go and Visual Studio (WebDirect), fail with 422.
     if ($status -eq 422 -and $message -match '(?i)offer type:?\s*(?<offer>[A-Za-z0-9_-]+)') {
-        return "$Activity failed (HTTP 422): Cost Details reads only EA and MCA subscriptions, and this one's offer type is $($Matches.offer). Remove its live source in 1 Source."
+        return "$Activity failed (HTTP 422): Cost Details reads only EA and MCA subscriptions, and this one's offer type is $($Matches.offer). Remove it with U in 1 Source."
     }
     $hint = switch ($status) {
         { $_ -in 401, 403 } { ' The signed-in account needs Cost Management read access at this scope, such as Cost Management Reader or an EA or MCA billing reader role. On EA, the enrollment''s view-charges setting must be on.' }
@@ -299,6 +299,24 @@ function Get-ForecastCostDetailsFailure {
     $detail = if ($code -or $message) { ": $(ConvertTo-ForecastSafeText "$code $message".Trim() 300)" } else { '' }
     $end = if ($detail -match '[.!?]$') { '' } else { '.' }
     return "$Activity failed (HTTP $status)$detail$end$hint"
+}
+
+function Get-ForecastUnreadableSources {
+    # Live sources whose every cached run failed because Cost Details doesn't
+    # read the subscription's offer type, such as Visual Studio (WebDirect).
+    # Matches the 422 text above and the service's own message, which runs
+    # read by earlier versions kept.
+    param([Parameter(Mandatory)]$Settings, [AllowEmptyCollection()][object[]]$Results = @())
+    foreach ($source in @($Settings.sources | Where-Object { $_ -and [string]$_.kind -eq 'CostDetails' })) {
+        $runs = @($Results | Where-Object { $_ -and [string]$_.SourceId -eq [string]$source.id })
+        $offers = @(foreach ($run in $runs) {
+                $match = @(foreach ($issue in @($run.Issues)) { [regex]::Match([string]$issue.Message, '\(HTTP 422\).*?offer type(?::| is)\s*(?<offer>[A-Za-z0-9_-]+)') }) | Where-Object Success | Select-Object -First 1
+                if ($match) { $match.Groups['offer'].Value }
+            })
+        if (-not $runs.Count -or $offers.Count -ne $runs.Count) { continue }
+        $name = ConvertTo-ForecastSafeText (([string]$source.label) -replace '\s*\(live\)$', '') 60
+        [pscustomobject]@{ Source = $source; Name = $(if ($name) { $name } else { [string]$source.scope }); Offer = $offers[0]; SubscriptionId = ConvertTo-ForecastSubscriptionId -Value ([string]$source.scope) }
+    }
 }
 
 function ConvertTo-ForecastCostDetailsPollPath {
