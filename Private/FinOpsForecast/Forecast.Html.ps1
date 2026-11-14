@@ -26,6 +26,9 @@ $script:ForecastHtmlTones = @{
     Fail = 'severity-red'; Incomplete = 'severity-red'; Missing = 'severity-red'; MissingActual = 'severity-red'
     Warn = 'severity-yellow'; Provisional = 'severity-yellow'; ProvisionalActual = 'severity-yellow'; Pending = 'severity-yellow'
     Pass = 'severity-green'
+    # Source read status.
+    'Rows' = 'severity-green'; 'No rows' = 'severity-yellow'; 'Partly read' = 'severity-yellow'; 'Not attempted' = 'severity-yellow'
+    'Unsupported offer' = 'severity-red'; 'Access denied' = 'severity-red'; 'Failed' = 'severity-red'
 }
 # Column widths in rem by format. Text columns share what's left.
 $script:ForecastHtmlWidths = @{ month = 7; amount = 8.5; percent = 6.5; bool = 5.5; status = 9.5; date = 7.5; number = 6 }
@@ -510,7 +513,10 @@ function ConvertTo-ForecastDriversHtml {
     [void]$sb.Append((ConvertTo-ForecastKpiHtml -Name 'History' -Value "$(Get-ForecastCountText -Count $months -Singular 'month' -Plural 'months'): $(Format-ForecastMonthRange -First $window.First -Last $window.Last)" -Plain $plain))
 
     $basis = @('Azure credits are never counted.')
-    if ($Settings) { $basis += "Marketplace charges are $(if ($Settings.filters.includeMarketplace) { 'included' } else { 'excluded' }); tax is $(if ($Settings.filters.includeTax) { 'included' } else { 'excluded' })." }
+    if ($Settings) {
+        $basis += "Marketplace charges are $(if ($Settings.filters.includeMarketplace) { 'included' } else { 'excluded' }); tax is $(if ($Settings.filters.includeTax) { 'included' } else { 'excluded' })."
+        if ((ConvertTo-ForecastSettingSwitch -Value $Settings.filters.showMarketplace -Default $true) -and @($Dataset.Marketplace | Where-Object { $_ }).Count) { $basis += 'The Marketplace tab lists Marketplace charges by month.' }
+    }
     $through = Format-ForecastLongDate $Dataset.DataThrough
     if ($through) { $basis += "Actual cost through $through." }
     $source = Get-ForecastHtmlSourceText -Settings $Settings -Dataset $Dataset
@@ -742,26 +748,110 @@ function ConvertTo-ForecastWorkloadsHtml {
     $months = @($Workloads.Months)
     $span = if ($months.Count) { "Change in 30-day run rate from $(Format-ForecastMonthRange -First $months[0] -Last $months[-1]). " } else { '' }
     $note = "$(Get-ForecastCountText -Count @($Workloads.Workloads).Count -Singular 'workload' -Plural 'workloads'), grouped $(Get-ForecastWorkloadGroupText -Workloads $Workloads). $($span)Share is a workload's change divided by the net change, $(Format-ForecastAmount $Workloads.NetChange $Currency). The largest increase is the biggest rise from one month to the next, which differs from the highest spend and the highest percentage growth."
+    $hasPurchases = @($Workloads.Workloads | Where-Object { [decimal]$_.PurchasesFirst -ne 0 -or [decimal]$_.PurchasesLast -ne 0 }).Count -gt 0
+    if ($hasPurchases -and $months.Count) { $note += " Purchases show on the subscription that pays for them, which may not be where a shared reservation or savings plan is used; net change adds the change in monthly purchases from $(Get-ForecastMonthName -MonthKey $months[0]) to $(Get-ForecastMonthName -MonthKey $months[-1])." }
+    $paceLabel = $null
+    if ($Workloads.PaceMonth -and $Workloads.PaceDays) {
+        $paceLabel = "$(Get-ForecastMonthName -MonthKey $Workloads.PaceMonth -Short -NoYear) pace"
+        $note += " $paceLabel is the cost from $(Get-ForecastMonthName -MonthKey $Workloads.PaceMonth -NoYear) 1 to $($Workloads.PaceDays), scaled to 30 days. It's for context and doesn't feed growth."
+    }
+    $columns = [Collections.Generic.List[object]]::new()
+    foreach ($column in @(
+            (New-ForecastColumn -Name WorkloadName -Label 'Workload'), (New-ForecastColumn -Name WorkloadId -Label 'ID' -Width 12), (New-ForecastColumn -Name Flags -Width 10),
+            (New-ForecastColumn -Name FirstRunRate -Label 'First' -Format amount), (New-ForecastColumn -Name LastRunRate -Label 'Last' -Format amount),
+            (New-ForecastColumn -Name Change -Format amount))) { $columns.Add($column) }
+    if ($hasPurchases) {
+        $columns.Add((New-ForecastColumn -Name PurchasesLast -Label 'Purchases, last month' -Format amount))
+        $columns.Add((New-ForecastColumn -Name NetChange -Label 'Net change' -Format amount))
+    }
+    foreach ($column in @(
+            (New-ForecastColumn -Name Growth -Format percent), (New-ForecastColumn -Name ContributionShare -Label 'Share' -Format percent),
+            (New-ForecastColumn -Name LargestIncreaseMonth -Label 'Largest increase month' -Format month), (New-ForecastColumn -Name LargestIncreaseAmount -Label 'Largest increase' -Format amount))) { $columns.Add($column) }
+    if ($paceLabel) { $columns.Add((New-ForecastColumn -Name MonthToDatePace -Label $paceLabel -Format amount)) }
+    $columns.Add((New-ForecastColumn -Name LookbackSpend -Label 'Lookback spend' -Format amount))
+    $columns.Add((New-ForecastColumn -Name Notes))
     $sb = [Text.StringBuilder]::new()
     [void]$sb.Append("<h2 id=""workloads-heading"" tabindex=""-1"">Workloads</h2>")
     [void]$sb.Append("<p class=""story-note"">$(ConvertTo-ForecastHtmlText $note)</p>")
-    [void]$sb.Append((ConvertTo-ForecastHtmlTable -Id 'table-workloads' -Title 'Workloads' -Rows $Workloads.Workloads -Empty 'No workloads had usage in the lookback window.' -Columns @(
-                (New-ForecastColumn -Name WorkloadName -Label 'Workload'), (New-ForecastColumn -Name WorkloadId -Label 'ID' -Width 12), (New-ForecastColumn -Name Flags -Width 10),
-                (New-ForecastColumn -Name FirstRunRate -Label 'First' -Format amount), (New-ForecastColumn -Name LastRunRate -Label 'Last' -Format amount),
-                (New-ForecastColumn -Name Change -Format amount), (New-ForecastColumn -Name Growth -Format percent), (New-ForecastColumn -Name ContributionShare -Label 'Share' -Format percent),
-                (New-ForecastColumn -Name LargestIncreaseMonth -Label 'Largest increase month' -Format month), (New-ForecastColumn -Name LargestIncreaseAmount -Label 'Largest increase' -Format amount),
-                (New-ForecastColumn -Name LookbackSpend -Label 'Lookback spend' -Format amount), (New-ForecastColumn -Name Notes))))
+    [void]$sb.Append((ConvertTo-ForecastHtmlTable -Id 'table-workloads' -Title 'Workloads' -Rows $Workloads.Workloads -Empty 'No workloads had usage in the lookback window.' -Columns $columns.ToArray()))
     return $sb.ToString()
 }
 
 function ConvertTo-ForecastChecksHtml {
-    param([Parameter(Mandatory)]$Readiness)
+    param([Parameter(Mandatory)]$Readiness, [AllowEmptyCollection()][object[]]$ReadStatus = @())
     $checks = @($Readiness.Checks)
     $summary = "$(@($checks | Where-Object Status -EQ 'Pass').Count) passed, $(@($checks | Where-Object Status -EQ 'Warn').Count) with a warning, and $(@($checks | Where-Object Status -EQ 'Fail').Count) failed. A Ready forecast needs no failed check and $($script:ForecastReadyMonths) months of history."
     $sb = [Text.StringBuilder]::new()
     [void]$sb.Append('<h2 id="checks-heading" tabindex="-1">Checks</h2>')
     [void]$sb.Append("<p class=""story-note"">$(ConvertTo-ForecastHtmlText $summary)</p>")
     [void]$sb.Append((ConvertTo-ForecastHtmlTable -Id 'table-checks' -Title 'Checks' -Rows $checks -Columns @((New-ForecastColumn -Name Name -Label 'Check' -Width 15), (New-ForecastColumn -Name Status -Format status -Tone -Width 7), (New-ForecastColumn -Name Detail))))
+    [void]$sb.Append((ConvertTo-ForecastReadStatusHtml -Rows $ReadStatus))
+    return $sb.ToString()
+}
+
+function ConvertTo-ForecastReadStatusHtml {
+    # Every configured source and what its reads returned, problems first,
+    # then the subscriptions left out of the scope with their reasons.
+    param([AllowEmptyCollection()][object[]]$Rows = @())
+    $rows = @($Rows | Where-Object { $_ })
+    if (-not $rows.Count) { return '' }
+    $order = @{ 'Unsupported offer' = 0; 'Access denied' = 1; 'Failed' = 2; 'Partly read' = 3; 'Not attempted' = 4; 'No rows' = 5; 'Left out' = 6; 'Rows' = 7 }
+    $sorted = @($rows | Sort-Object @{ Expression = { if ($order.ContainsKey([string]$_.Status)) { $order[[string]$_.Status] } else { 9 } } }, @{ Expression = { [string]$_.Source } })
+    $note = "$(Get-ForecastReadStatusSummary -Rows $rows) The first and last charge come from each source's latest complete month; charges that start late or end early are noted, since a quiet subscription can stop early but missing days can also mean missing data."
+    $sb = [Text.StringBuilder]::new()
+    [void]$sb.Append('<h2 id="read-status-heading" tabindex="-1">Sources read</h2>')
+    [void]$sb.Append("<p class=""story-note"">$(ConvertTo-ForecastHtmlText $note)</p>")
+    [void]$sb.Append((ConvertTo-ForecastHtmlTable -Id 'table-read-status' -Title 'Sources read' -Rows $sorted -Columns @(
+                (New-ForecastColumn -Name Source -Width 16), (New-ForecastColumn -Name Kind -Width 10), (New-ForecastColumn -Name Status -Format status -Tone),
+                (New-ForecastColumn -Name MonthsRead -Label 'Months read' -Width 6.5), (New-ForecastColumn -Name Rows -Format number), (New-ForecastColumn -Name Included -Label 'Included' -Format amount),
+                (New-ForecastColumn -Name FirstCharge -Label 'First charge' -Format date), (New-ForecastColumn -Name LastCharge -Label 'Last charge' -Format date), (New-ForecastColumn -Name Detail))))
+    return $sb.ToString()
+}
+
+function ConvertTo-ForecastMarketplaceHtml {
+    # Marketplace charges in scope, by month and by subscription. They're
+    # counted only when the Marketplace filter includes them. Amounts in
+    # different billing currencies are grouped and totaled apart.
+    param([AllowEmptyCollection()][object[]]$Rows = @(), [Collections.IDictionary]$SubscriptionNames, [bool]$Counted, [string]$Currency)
+    $rows = @($Rows | Where-Object { $_ })
+    $currencies = @($rows | ForEach-Object { [string]$_.Currency } | Sort-Object -Unique)
+    $mixed = $currencies.Count -gt 1
+    $months = @($rows | ForEach-Object Month | Sort-Object -Unique)
+    $monthly = foreach ($group in @($rows | Group-Object { "$($_.Month)|$($_.Currency)" } | Sort-Object Name)) {
+        $usage = 0d; $purchases = 0d; $other = 0d
+        foreach ($row in $group.Group) { switch ([string]$row.Stream) { 'RunRate' { $usage += [decimal]$row.Cost } 'Purchase' { $purchases += [decimal]$row.Cost } default { $other += [decimal]$row.Cost } } }
+        [pscustomobject]@{ Month = [string]$group.Group[0].Month; Currency = [string]$group.Group[0].Currency; Usage = $usage; Purchases = $purchases; Other = $other; Total = $usage + $purchases + $other }
+    }
+    $bySubscription = foreach ($group in @($rows | Group-Object { "$($_.SubscriptionId)|$($_.Currency)" })) {
+        $id = [string]$group.Group[0].SubscriptionId
+        $sum = 0d; foreach ($row in $group.Group) { $sum += [decimal]$row.Cost }
+        $latest = @($group.Group | ForEach-Object Month | Sort-Object)[-1]
+        $latestSum = 0d; foreach ($row in @($group.Group | Where-Object Month -EQ $latest)) { $latestSum += [decimal]$row.Cost }
+        $name = if ($id -and $SubscriptionNames -and $SubscriptionNames[$id]) { ConvertTo-ForecastSafeText ([string]$SubscriptionNames[$id]) 60 } elseif ($id) { $id } else { 'No subscription' }
+        [pscustomobject]@{ Subscription = $name; SubscriptionId = $id; Currency = [string]$group.Group[0].Currency; Months = @($group.Group | ForEach-Object Month | Sort-Object -Unique).Count; Total = $sum; LatestMonth = $latest; LatestTotal = $latestSum }
+    }
+    $bySubscription = @($bySubscription | Sort-Object Currency, @{ Expression = { [decimal]$_.Total }; Descending = $true }, Subscription)
+    $totals = foreach ($code in $currencies) { $sum = 0d; foreach ($row in @($rows | Where-Object { [string]$_.Currency -eq $code })) { $sum += [decimal]$row.Cost }; Format-ForecastAmount $sum $(if ($code) { $code } else { $Currency }) }
+    $span = if ($months.Count) { " from $(Format-ForecastMonthRange -First $months[0] -Last $months[-1])" } else { '' }
+    $amounts = if ($mixed) { "are in $($currencies.Count) billing currencies, totaled separately: $(@($totals) -join '; ')" } else { "total $(@($totals)[0])" }
+    $note = "Marketplace charges in the scope $amounts$span. $(if ($Counted) { 'They''re counted in the forecast, because the Marketplace filter includes them.' } else { 'They''re not in the forecast; the Marketplace filter in 4 Assumptions leaves them out.' }) They're listed here for tracking commitments, such as an Azure consumption commitment; whether a Marketplace charge counts toward one depends on the offer."
+    # A totals row would add currencies together, so it's left off when they're mixed.
+    $footer = $null
+    if (-not $mixed) {
+        $footer = [ordered]@{ Month = 'Total' }
+        foreach ($name in 'Usage', 'Purchases', 'Other', 'Total') { $sum = 0d; foreach ($row in @($monthly)) { $sum += [decimal]$row.$name }; $footer[$name] = $sum }
+    }
+    $currencyColumn = if ($mixed) { @(New-ForecastColumn -Name Currency -Width 6) } else { @() }
+    $sb = [Text.StringBuilder]::new()
+    [void]$sb.Append('<h2 id="marketplace-heading" tabindex="-1">Marketplace</h2>')
+    [void]$sb.Append("<p class=""story-note"">$(ConvertTo-ForecastHtmlText $note)</p>")
+    [void]$sb.Append((ConvertTo-ForecastHtmlTable -Id 'table-marketplace-monthly' -Title 'Marketplace by month' -Rows @($monthly) -Footer $footer -Empty 'No Marketplace charges in the scope.' -Columns @(
+                @(New-ForecastColumn -Name Month -Format month) + $currencyColumn + @((New-ForecastColumn -Name Usage -Format amount), (New-ForecastColumn -Name Purchases -Format amount),
+                    (New-ForecastColumn -Name Other -Format amount), (New-ForecastColumn -Name Total -Format amount)))))
+    [void]$sb.Append('<h2 id="marketplace-subscriptions-heading" tabindex="-1">Marketplace by subscription</h2>')
+    [void]$sb.Append((ConvertTo-ForecastHtmlTable -Id 'table-marketplace-subscriptions' -Title 'Marketplace by subscription' -Rows $bySubscription -Empty 'No Marketplace charges in the scope.' -Columns @(
+                @((New-ForecastColumn -Name Subscription), (New-ForecastColumn -Name SubscriptionId -Label 'Subscription ID' -Width 18)) + $currencyColumn + @((New-ForecastColumn -Name Months -Label 'Months with charges' -Format number),
+                    (New-ForecastColumn -Name Total -Format amount), (New-ForecastColumn -Name LatestMonth -Label 'Latest month' -Format month), (New-ForecastColumn -Name LatestTotal -Label 'Latest month total' -Format amount)))))
     return $sb.ToString()
 }
 
@@ -883,7 +973,7 @@ h2[tabindex]:focus { outline: none; }
 .summary-card.status.NotReady { border-top-color: var(--danger); }
 .summary-card.status.NotReady .value { color: var(--danger); }
 .tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 2px solid var(--light-gray); margin: 22px 0 0 0; position: sticky; top: 0; background: #FFFFFF; z-index: 10; }
-.tab { font: inherit; font-size: 12px; font-weight: 600; text-transform: uppercase; color: var(--muted); background: none; border: 0; border-bottom: 3px solid transparent; margin-bottom: -2px; padding: 11px 12px; cursor: pointer; }
+.tab { font: inherit; font-size: 11.5px; font-weight: 600; text-transform: uppercase; color: var(--muted); background: none; border: 0; border-bottom: 3px solid transparent; margin-bottom: -2px; padding: 11px 9px; cursor: pointer; }
 .tab:hover { color: var(--energy-blue); background: var(--surface); }
 .tab.active { color: var(--energy-blue); border-bottom-color: var(--energy-blue); }
 .tab:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
@@ -1330,7 +1420,11 @@ function ConvertTo-ForecastHtml {
     $panes.Add([pscustomobject]@{ Id = 'history'; Label = 'Monthly history'; Html = (ConvertTo-ForecastHistoryHtml -Model $Model -Currency $currency) })
     $panes.Add([pscustomobject]@{ Id = 'comparisons'; Label = 'Adjacent-month comparisons'; Html = (ConvertTo-ForecastComparisonsHtml -Model $Model) })
     if ($Workloads) { $panes.Add([pscustomobject]@{ Id = 'workloads'; Label = 'Workloads'; Html = (ConvertTo-ForecastWorkloadsHtml -Workloads $Workloads -Currency $currency) }) }
-    $panes.Add([pscustomobject]@{ Id = 'checks'; Label = 'Checks'; Html = (ConvertTo-ForecastChecksHtml -Readiness $Readiness) })
+    $marketRows = @($Dataset.Marketplace | Where-Object { $_ })
+    if ($marketRows.Count -and (-not $Settings -or (ConvertTo-ForecastSettingSwitch -Value $Settings.filters.showMarketplace -Default $true))) {
+        $panes.Add([pscustomobject]@{ Id = 'marketplace'; Label = 'Marketplace'; Html = (ConvertTo-ForecastMarketplaceHtml -Rows $marketRows -SubscriptionNames $Dataset.SubscriptionNames -Counted ([bool]($Settings -and $Settings.filters.includeMarketplace)) -Currency $currency) })
+    }
+    $panes.Add([pscustomobject]@{ Id = 'checks'; Label = 'Checks'; Html = (ConvertTo-ForecastChecksHtml -Readiness $Readiness -ReadStatus @($Dataset.ReadStatus | Where-Object { $_ })) })
     $panes.Add([pscustomobject]@{ Id = 'reviews'; Label = 'Exceptions and reviews'; Html = (ConvertTo-ForecastReviewsHtml -Readiness $Readiness) })
     if ($Backtest) { $panes.Add([pscustomobject]@{ Id = 'backtest'; Label = 'Backtest'; Html = (ConvertTo-ForecastBacktestHtml -Backtest $Backtest) }) }
     $panes.Add([pscustomobject]@{ Id = 'reconciliation'; Label = 'Reconciliation'; Html = (ConvertTo-ForecastReconciliationHtml -Dataset $Dataset) })

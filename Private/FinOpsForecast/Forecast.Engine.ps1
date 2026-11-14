@@ -141,10 +141,18 @@ function Get-ForecastComparisonIdentity {
 
 function New-ForecastComparisonReview {
     # A review of a change that wasn't flagged, for when you know why the run
-    # rate moved, or there are too few changes for any to be flagged.
-    param([Parameter(Mandatory)]$Comparison, [string]$ScopeKey = '', [Collections.IDictionary]$Reviews, $Median, $Threshold)
+    # rate moved, or there are too few changes for any to be flagged. With
+    # AgreementChange, it's the required review of a change between months
+    # billed under different agreements.
+    param([Parameter(Mandatory)]$Comparison, [string]$ScopeKey = '', [Collections.IDictionary]$Reviews, $Median, $Threshold, [switch]$AgreementChange)
     $identity = Get-ForecastComparisonIdentity -Comparison $Comparison -ScopeKey $ScopeKey
     $context = if ($null -ne $Median -and $null -ne $Threshold) { "It isn't flagged: the median change is $(Format-ForecastPercent $Median), and the flag threshold is +/- $(Format-ForecastPercent $Threshold). " } else { '' }
+    if ($AgreementChange) {
+        return New-ForecastReviewItem -Key $identity.Key -Fingerprint $identity.Fingerprint -Category 'AgreementChange' -Reviews $Reviews -Subject $Comparison.ToMonth `
+            -Title "Change $($Comparison.FromMonth) to $($Comparison.ToMonth) spans a change of agreement: $(Format-ForecastPercent $Comparison.Change)" `
+            -Detail "$($Comparison.FromMonth) is billed under $($Comparison.FromAgreements), and $($Comparison.ToMonth) under $($Comparison.ToAgreements). EA and MCA prices can differ, so part of this change may be a price change rather than growth in usage. ${context}Compare the unit prices of a few services across the two months. Retain counts the change as growth. Exclude and StepChange leave it out of growth; StepChange records that the new level is real. Until you decide, it counts as growth. Actual charges stay in actuals either way." `
+            -Options @('Retain', 'Exclude', 'StepChange') -Suggested 'Retain'
+    }
     New-ForecastReviewItem -Key $identity.Key -Fingerprint $identity.Fingerprint -Category 'Comparison' -Reviews $Reviews -Subject $Comparison.ToMonth `
         -Title "Change $($Comparison.FromMonth) to $($Comparison.ToMonth): $(Format-ForecastPercent $Comparison.Change), reviewed by hand" `
         -Detail "${context}Review it by hand when you know why the run rate moved, such as new reservations or savings plans covering usage, or a migration. Retain counts it as growth. Exclude and StepChange leave it out of growth; StepChange records that the new level is real. Actual charges stay in actuals either way." `
@@ -172,12 +180,20 @@ function Get-ForecastComparisons {
         $toRate = if (Test-ForecastMonthUsable $current) { Get-ForecastNormalizedRunRate $current } else { $null }
         $status = if (-not $usable) { 'MissingData' } elseif ($fromRate -le 0) { 'Undefined' } else { 'Defined' }
         $change = if ($status -eq 'Defined') { ($toRate / $fromRate) - 1d } else { $null }
+        # Months billed under different agreements, such as EA before a move
+        # to MCA and both in the month of the move, can differ in price.
+        $fromAgreements = @($previous.Agreements | Where-Object { $_ } | Sort-Object -Unique)
+        $toAgreements = @($current.Agreements | Where-Object { $_ } | Sort-Object -Unique)
+        $spanned = @($fromAgreements + $toAgreements | Sort-Object -Unique)
+        $agreementChange = $fromAgreements.Count -gt 0 -and $toAgreements.Count -gt 0 -and ($fromAgreements -join '+') -ne ($toAgreements -join '+') -and 'EA' -in $spanned -and 'MCA' -in $spanned
         $comparisons.Add([pscustomobject]@{
                 Index = $i; FromMonth = [string]$previous.Month; ToMonth = [string]$current.Month
                 FromRunRate = $fromRate; ToRunRate = $toRate; Change = $change; Status = $status
                 Flagged = $false; Deviation = $null; Suggestion = $null; Review = $null; Retained = $false; Reason = ''
+                AgreementChange = $agreementChange; FromAgreements = ($fromAgreements -join ' and '); ToAgreements = ($toAgreements -join ' and ')
             })
     }
+    $reviewAgreementChange = ConvertTo-ForecastSettingSwitch -Value $Settings.method.reviewAgreementChange -Default $true
 
     $defined = [decimal[]]@($comparisons | Where-Object Status -EQ 'Defined' | ForEach-Object { [decimal]$_.Change })
     $median = if ($defined.Count) { Get-ForecastMedian -Values $defined } else { $null }
@@ -219,10 +235,14 @@ function Get-ForecastComparisons {
                     $why = if ($reverses) { "It reverses the flagged change from $($previous.FromMonth) to $($previous.ToMonth): the run rate is back near its earlier trend, which points to a one-off spike or dip rather than a new level." }
                     elseif ($persisted) { 'The new level held the following month, which suggests a step change: a one-time move to a new level, such as new reservations or savings plans covering usage.' }
                     else { 'The change didn''t persist into the next month, or it''s the latest comparison.' }
+                    if ($comparison.AgreementChange) { $why += " It also spans a change of agreement ($($comparison.FromAgreements) to $($comparison.ToAgreements)), and EA and MCA prices can differ." }
                     $comparison.Review = New-ForecastReviewItem -Key $key -Fingerprint $fingerprint -Category 'Anomaly' -Reviews $Reviews -Subject $comparison.ToMonth `
                         -Title "Anomalous change $($comparison.FromMonth) to $($comparison.ToMonth): $(Format-ForecastPercent $comparison.Change)" `
                         -Detail "Median change is $(Format-ForecastPercent $median); the flag threshold is +/- $(Format-ForecastPercent $threshold). $why Retain counts it as growth. Exclude and StepChange leave it out of growth; StepChange records that the new level is real, and the baseline already reflects it. Investigate before deciding. Actual charges stay in actuals either way." `
                         -Options @('Retain', 'Exclude', 'StepChange') -Suggested $comparison.Suggestion
+                }
+                elseif ($comparison.AgreementChange -and $reviewAgreementChange) {
+                    $comparison.Review = New-ForecastComparisonReview -Comparison $comparison -ScopeKey $ScopeKey -Reviews $Reviews -Median $median -Threshold $threshold -AgreementChange
                 }
                 elseif ($Reviews -and $Reviews.ContainsKey($key)) {
                     # A change reviewed by hand keeps its decision until its data changes.
@@ -241,7 +261,9 @@ function Get-ForecastComparisons {
             }
             elseif ($decision -eq 'Exclude') { 'Excluded from growth after review.' }
             elseif ($decision -eq 'StepChange') { 'A step change after review, so the jump is left out of growth.' }
+            elseif ($decision -eq 'Pending' -and $comparison.Review.Category -eq 'AgreementChange') { 'Spans a change of agreement, whose prices can differ; waiting for review, and counted in growth until then.' }
             elseif ($decision -eq 'Pending') { 'Within the normal range; its data changed since it was reviewed, so it needs a new review.' }
+            elseif ($comparison.Review -and $comparison.Review.Category -eq 'AgreementChange') { 'Spans a change of agreement; retained after review.' }
             else { 'Within the normal range.' }
         }
     }

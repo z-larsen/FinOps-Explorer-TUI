@@ -160,6 +160,26 @@ Describe 'Copilot review regressions' {
         }
     }
 
+    It 'Turns the new switches on by default, reads a hand-edited false as off, and checks subscriptions left out of the scope' {
+        InModuleScope FinOpsForecast {
+            $defaults = ConvertTo-ForecastSettings -Loaded ([pscustomobject]@{ schemaVersion = 3 })
+            $defaults.filters.showMarketplace | Should -BeTrue
+            $defaults.method.reviewAgreementChange | Should -BeTrue
+            @($defaults.scope.excluded).Count | Should -Be 0
+            $edited = ConvertTo-ForecastSettings -Loaded ([pscustomobject]@{ schemaVersion = 3; filters = [pscustomobject]@{ showMarketplace = 'false' }; method = [pscustomobject]@{ reviewAgreementChange = 'False' } })
+            $edited.filters.showMarketplace | Should -BeFalse
+            $edited.method.reviewAgreementChange | Should -BeFalse
+
+            $id = '11111111-1111-1111-1111-111111111111'
+            $defaults.scope.subscriptionIds = @($id)
+            $defaults.scope.excluded = @([pscustomobject]@{ subscriptionId = $id; name = 'sub-synth-a'; reason = ' ' })
+            @(Test-ForecastSettings -Settings $defaults | Where-Object Code -EQ 'SET-EXCLUDED').Count | Should -Be 2 -Because 'it has no reason and is also in the scope'
+            # Choosing it for the scope again means it's no longer left out.
+            Update-ForecastScopeExclusions -Settings $defaults
+            @($defaults.scope.excluded).Count | Should -Be 0
+        }
+    }
+
     It 'Treats a month as final from the fifth day after it ends' {
         # A daily export writes its last copy of a closed month on day 5, so November is final from the start of December 5.
         InModuleScope FinOpsForecast {
@@ -218,6 +238,20 @@ Describe 'Copilot review regressions' {
         InModuleScope FinOpsForecast -Parameters @{ Value = $Value; Expected = $Expected } {
             Format-ForecastHtmlCell -Value $Value -Format amount | Should -BeExactly $Expected
         }
+    }
+
+    It 'Totals Marketplace charges by currency, never adding currencies together' {
+        $html = InModuleScope FinOpsForecast {
+            $rows = @(
+                [pscustomobject]@{ Month = '2026-09'; SubscriptionId = 'sub-synth-1'; ChargeType = 'Usage'; Stream = 'RunRate'; PublisherName = ''; Counted = $false; Cost = 100d; Rows = 1L; Currency = 'USD' }
+                [pscustomobject]@{ Month = '2026-09'; SubscriptionId = 'sub-synth-2'; ChargeType = 'Usage'; Stream = 'RunRate'; PublisherName = ''; Counted = $false; Cost = 100d; Rows = 1L; Currency = 'EUR' }
+            )
+            ConvertTo-ForecastMarketplaceHtml -Rows $rows -SubscriptionNames @{} -Counted $false -Currency 'USD'
+        }
+        $html | Should -Match 'are in 2 billing currencies, totaled separately: 100\.00 EUR; 100\.00 USD'
+        $html | Should -Not -Match '200\.00'
+        $html | Should -Not -Match '<tfoot>' -Because 'a totals row would add the currencies together'
+        $html | Should -Match '<th scope="col">Currency</th>'
     }
 
     It 'Fits a chart axis from <Min> to <Max> in round steps of <Step>' -ForEach @(

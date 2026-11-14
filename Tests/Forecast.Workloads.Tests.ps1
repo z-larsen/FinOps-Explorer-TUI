@@ -180,7 +180,66 @@ Describe 'Workload analysis' {
             $workload = Get-Workload $analysis 'tag:vm-app'
             $workload.Notes | Should -Match 'coverage moved from 0% to 80%'
             (Round8 $workload.LatestMonthSpend) | Should -Be 200
+            $workload.PurchasesLast | Should -Be 900 -Because 'a purchase shows where it''s billed, apart from usage'
             $analysis.Purchases.Count | Should -Be 1
+        }
+    }
+
+    Context 'Purchases and month-to-date pace' {
+        It 'Shows purchases beside the subscription that pays for them, with a net change' {
+            $cells = @(New-RateCells -Rates ([decimal[]]@(1..12 | ForEach-Object { 1000 })) -Tag '')
+            $cells += New-TestCell -Month $script:Months[0] -ResourceGroup '' -Cost 300 -Stream 'Purchase'
+            $cells += New-TestCell -Month $script:Months[11] -ResourceGroup '' -Cost 100 -Stream 'Purchase'
+            $cells += New-TestCell -Month $script:Months[11] -Subscription 'B' -ResourceGroup '' -Cost 50 -Stream 'Purchase'
+            $analysis = Invoke-TestWorkloads -Cells $cells
+            $payer = Get-Workload $analysis "unmapped:$($script:SyntheticSubscriptions.A)"
+            $payer.Change | Should -Be 0
+            $payer.PurchasesFirst | Should -Be 300
+            $payer.PurchasesLast | Should -Be 100
+            $payer.NetChange | Should -Be -200
+            $payer.Notes | Should -Match 'this subscription pays for'
+            $buyer = Get-Workload $analysis "unmapped:$($script:SyntheticSubscriptions.B)"
+            $buyer.Flags | Should -Match 'Purchases only'
+            $buyer.NetChange | Should -Be 50
+            $analysis.NetChange | Should -Be 0 -Because 'purchases never change the run-rate net change or shares'
+            $analysis.Purchases.Count | Should -Be 3
+        }
+
+        It 'Paces the month in progress from its days with data, and lists a workload new this month' {
+            $cells = @(New-RateCells -Rates ([decimal[]]@(1..12 | ForEach-Object { 1000 })) -Tag 'app-alpha')
+            $cells += New-TestCell -Month '2026-11' -Tag 'app-alpha' -Cost 400
+            $cells += New-TestCell -Month '2026-11' -Tag 'app-new' -Cost 100
+            $settings = New-TestSettings
+            $analysis = InModuleScope FinOpsForecast -Parameters @{ Cells = $cells; Settings = $settings; Months = $script:Months } {
+                Get-ForecastWorkloadAnalysis -Cells $Cells -Months $Months -Settings $Settings -Rules @() -SubscriptionNames @{} -PaceMonth '2026-11' -PaceDays 10
+            }
+            $analysis.PaceMonth | Should -Be '2026-11'
+            (Get-Workload $analysis 'tag:app-alpha').MonthToDatePace | Should -Be 1200
+            (Get-Workload $analysis 'tag:app-alpha').Change | Should -Be 0 -Because 'the month in progress never feeds the change'
+            $new = Get-Workload $analysis 'tag:app-new'
+            $new.Flags | Should -Match 'New this month'
+            $new.MonthToDatePace | Should -Be 300
+            $plain = Invoke-TestWorkloads -Cells $cells
+            (Get-Workload $plain 'tag:app-alpha').MonthToDatePace | Should -BeNullOrEmpty
+            Get-Workload $plain 'tag:app-new' | Should -BeNullOrEmpty
+        }
+
+        It 'Finds the month in progress after the window and how many of its days have data' {
+            $pace = InModuleScope FinOpsForecast {
+                $dataset = [pscustomobject]@{ Months = @(
+                        [pscustomobject]@{ Month = '2026-10'; Status = 'Complete'; Headline = 10d; DataThrough = [datetime]'2026-10-31' }
+                        [pscustomobject]@{ Month = '2026-11'; Status = 'Provisional'; Headline = 5d; DataThrough = [datetime]'2026-11-11' }
+                    )
+                }
+                $window = [pscustomobject]@{ Last = '2026-10' }
+                $found = Get-ForecastMonthToDate -Dataset $dataset -Window $window
+                # Runs with different cutoffs make the month Incomplete; its earliest cutoff would overstate the pace.
+                $dataset.Months[1].Status = 'Incomplete'
+                [pscustomobject]@{ Found = $found; Mismatched = Get-ForecastMonthToDate -Dataset $dataset -Window $window }
+            }
+            $pace.Found.Month | Should -Be '2026-11'
+            $pace.Found.Days | Should -Be 11
+            $pace.Mismatched | Should -BeNullOrEmpty
         }
     }
 

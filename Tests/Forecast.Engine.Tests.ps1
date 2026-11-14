@@ -45,6 +45,36 @@ Describe 'Forecast engine' {
             @($model.Comparisons.Items | Where-Object Status -EQ 'Defined').Count | Should -Be 11
         }
 
+        It 'Asks for a review of each change between months on different agreements, and counts it until decided' {
+            $rates = [decimal[]](1000, 1020, 1040, 1061, 1082, 1104, 1126, 1149, 1172, 1195, 1219, 1243)
+            $dataset = New-TestDataset -Values (New-RateSeries $rates)
+            # EA until June, both in the month of the move, then MCA.
+            foreach ($row in $dataset.Months) {
+                $agreements = if ([string]::CompareOrdinal($row.Month, '2026-07') -lt 0) { @('EA') } elseif ($row.Month -eq '2026-07') { @('EA', 'MCA') } else { @('MCA') }
+                $row | Add-Member -NotePropertyName Agreements -NotePropertyValue $agreements
+            }
+            $settings = New-TestSettings
+            $model = Invoke-TestModel -Dataset $dataset -Settings $settings
+            (@($model.Comparisons.Items | Where-Object AgreementChange | ForEach-Object { "$($_.FromMonth) to $($_.ToMonth)" }) -join ', ') | Should -Be '2026-06 to 2026-07, 2026-07 to 2026-08'
+            $reviews = @($model.Reviews | Where-Object Category -EQ 'AgreementChange')
+            $reviews.Count | Should -Be 2
+            foreach ($review in $reviews) {
+                $review.Required | Should -BeTrue
+                $review.Decision | Should -Be 'Pending'
+                $review.Detail | Should -Match 'EA and MCA prices can differ'
+            }
+            @($model.Comparisons.Items | Where-Object { $_.AgreementChange -and $_.Retained }).Count | Should -Be 2 -Because 'a pending review leaves the change in growth, so the numbers move only after a decision'
+
+            $excluded = Invoke-TestModel -Dataset $dataset -Settings $settings -Reviews (New-ReviewRecord $reviews[0] 'Exclude')
+            @($excluded.Comparisons.Items | Where-Object ToMonth -EQ '2026-07')[0].Retained | Should -BeFalse
+            $excluded.Growth.Retained | Should -Be 10
+
+            $settings.method.reviewAgreementChange = $false
+            $off = Invoke-TestModel -Dataset $dataset -Settings $settings
+            @($off.Reviews | Where-Object Category -EQ 'AgreementChange').Count | Should -Be 0
+            $off.Projection.TotalCentral | Should -Be $model.Projection.TotalCentral
+        }
+
         It 'Orders months by date key, not by the order rows arrive in' {
             $rates = [decimal[]](1000, 1100, 1050, 1200, 1180, 1250, 1300, 1280, 1350, 1400, 1390, 1450)
             $ordered = New-TestDataset -Values (New-RateSeries $rates)

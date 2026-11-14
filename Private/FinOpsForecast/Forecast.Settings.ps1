@@ -32,10 +32,13 @@ function New-ForecastDefaultSettings {
     [pscustomobject]@{
         schemaVersion  = $script:ForecastSettingsVersion
         dataMode       = 'Exports'
-        scope          = [pscustomobject]@{ kind = 'Subscriptions'; subscriptionIds = @(); billingProfileId = ''; label = '' }
+        # excluded: subscriptions taken out of the scope, each with the reason recorded when it was removed.
+        scope          = [pscustomobject]@{ kind = 'Subscriptions'; subscriptionIds = @(); billingProfileId = ''; label = ''; excluded = @() }
         period         = [pscustomobject]@{ fiscalYearStartMonth = 1; fiscalYearOffset = 0; lookbackMonths = 12; graceDays = $script:ForecastDefaultGraceDays; staleAfterDays = 35; windowEnd = 'Auto' }
-        filters        = [pscustomobject]@{ includeMarketplace = $false; includeTax = $false }
-        method         = [pscustomobject]@{ central = 'Median'; lowPercentile = 25; highPercentile = 75; anomalyK = '3'; anomalyMinimumDeviation = '0.05'; minimumRetained = 8; backtestHorizon = 6 }
+        # showMarketplace lists Marketplace charges in their own report section whether or not includeMarketplace counts them.
+        filters        = [pscustomobject]@{ includeMarketplace = $false; includeTax = $false; showMarketplace = $true }
+        # reviewAgreementChange asks for a decision on each change between months on different agreements (EA and MCA).
+        method         = [pscustomobject]@{ central = 'Median'; lowPercentile = 25; highPercentile = 75; anomalyK = '3'; anomalyMinimumDeviation = '0.05'; minimumRetained = 8; backtestHorizon = 6; reviewAgreementChange = $true }
         workloads      = [pscustomobject]@{ mode = 'Tag'; tagKey = 'workload'; mappingPath = '' }
         sources        = @()
         migration      = [pscustomobject]@{ boundaryDate = '' }
@@ -74,7 +77,28 @@ function ConvertTo-ForecastSettings {
     $settings.sources = @($Loaded.sources | Where-Object { $null -ne $_ })
     $settings.scheduledItems = @($Loaded.scheduledItems | Where-Object { $null -ne $_ })
     $settings.scope.subscriptionIds = @($settings.scope.subscriptionIds | Where-Object { $_ })
+    $settings.scope.excluded = @($settings.scope.excluded | Where-Object { $null -ne $_ })
+    $settings.filters.showMarketplace = ConvertTo-ForecastSettingSwitch -Value $settings.filters.showMarketplace -Default $true
+    $settings.method.reviewAgreementChange = ConvertTo-ForecastSettingSwitch -Value $settings.method.reviewAgreementChange -Default $true
     return $settings
+}
+
+function ConvertTo-ForecastSettingSwitch {
+    # A hand-edited "false" must stay false; [bool]'false' would be true.
+    param([AllowNull()]$Value, [bool]$Default)
+    if ($Value -is [bool]) { return $Value }
+    switch -Regex ([string]$Value) {
+        '^(?i)(true|yes|1)$' { return $true }
+        '^(?i)(false|no|0)$' { return $false }
+    }
+    return $Default
+}
+
+function Update-ForecastScopeExclusions {
+    # A subscription chosen for the scope again is no longer left out of it.
+    param([Parameter(Mandatory)]$Settings)
+    $inScope = @($Settings.scope.subscriptionIds | ForEach-Object { ConvertTo-ForecastSubscriptionId -Value ([string]$_) } | Where-Object { $_ })
+    $Settings.scope.excluded = @($Settings.scope.excluded | Where-Object { $_ -and (ConvertTo-ForecastSubscriptionId -Value ([string]$_.subscriptionId)) -notin $inScope })
 }
 
 function Get-ForecastMethodNumber {
@@ -126,6 +150,14 @@ function Test-ForecastSettings {
         }
     }
     elseif ([string]::IsNullOrWhiteSpace([string]$Settings.scope.billingProfileId)) { $issues.Add((New-ForecastIssue -Code 'SET-SCOPE' -Message 'Enter the billing profile ID.')) }
+    $inScope = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($id in @($Settings.scope.subscriptionIds)) { $normalized = ConvertTo-ForecastSubscriptionId -Value $id; if ($normalized) { [void]$inScope.Add($normalized) } }
+    foreach ($exclusion in @($Settings.scope.excluded)) {
+        $excludedId = ConvertTo-ForecastSubscriptionId -Value ([string]$exclusion.subscriptionId)
+        if (-not $excludedId) { $issues.Add((New-ForecastIssue -Code 'SET-EXCLUDED' -Message "A subscription left out of the scope has no valid subscription ID.")); continue }
+        if ([string]::IsNullOrWhiteSpace([string]$exclusion.reason)) { $issues.Add((New-ForecastIssue -Code 'SET-EXCLUDED' -Message "Subscription $excludedId was left out of the scope without a reason.")) }
+        if ($inScope.Contains($excludedId)) { $issues.Add((New-ForecastIssue -Code 'SET-EXCLUDED' -Message "Subscription $excludedId is in the scope and also listed as left out of it.")) }
+    }
 
     if ($Settings.migration.boundaryDate -and -not (ConvertFrom-ForecastDate -Value $Settings.migration.boundaryDate)) { $issues.Add((New-ForecastIssue -Code 'SET-BOUNDARY' -Message 'The migration boundary must be a date (yyyy-MM-dd).')) }
 

@@ -14,6 +14,21 @@ param()
 # that apply, so problems surface where they're fixed.
 ###########################################################################
 
+function Add-ForecastProposedItem {
+    # Adds a proposed scheduled item, such as a recurring purchase found in
+    # the history, after the same checks as an item entered by hand.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Proposal)
+    $settings = Get-ForecastStoredSettings -Root $Root
+    $items = @($settings.scheduledItems | Where-Object { $_ })
+    $check = Test-ForecastScheduledItems -Items @($items + $Proposal)
+    $problems = @($check.Issues | Where-Object { $_.Subject -eq $Proposal.id -or $_.Code -eq 'SCH-DUPLICATE' })
+    if ($problems.Count) { foreach ($problem in $problems) { Write-FinOpsConsole "  ! $($problem.Message)" -ForegroundColor Yellow }; return $false }
+    $settings.scheduledItems = @($items + $Proposal)
+    Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings
+    Write-FinOpsConsole "  Added scheduled item $($Proposal.id): $(Format-ForecastAmount (Read-ForecastDecimal $Proposal.amount)) a month from $($Proposal.startMonth), with no end month. If the commitment ends sooner, set its end month in 4 Assumptions, S." -ForegroundColor Cyan
+    return $true
+}
+
 function Save-ForecastSettingsWithFeedback {
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Settings)
     Save-ForecastStoredSettings -Root $Root -Settings $Settings
@@ -70,8 +85,18 @@ function Remove-ForecastUnreadableSources {
     Write-FinOpsConsole "  Cost Details reads only EA and MCA subscriptions, so the last refresh couldn't read these $($unreadable.Count):"
     foreach ($item in $unreadable) { Write-FinOpsConsole "    $($item.Name)  (offer type $($item.Offer))" }
     if (-not (Read-ForecastYesNo -Prompt 'Remove their live sources and take them out of the scope?')) { return }
+    # Each subscription left out keeps a reason, which the report lists.
+    $reason = ConvertTo-ForecastSafeText (Read-ForecastText -Prompt 'Reason for leaving them out (Enter for each one''s offer type)') 300
     $sourceIds = @($unreadable | ForEach-Object { [string]$_.Source.id })
     $subscriptionIds = @($unreadable | ForEach-Object SubscriptionId | Where-Object { $_ })
+    $recorded = [datetime]::UtcNow.ToString('o', $script:ForecastInvariant)
+    $exclusions = @($unreadable | Where-Object SubscriptionId | ForEach-Object {
+            [pscustomobject]@{
+                subscriptionId = [string]$_.SubscriptionId; name = [string]$_.Name; recordedUtc = $recorded
+                reason = if ($reason) { $reason } else { "Offer type $($_.Offer): Cost Details reads only EA and MCA subscriptions, so its cost can't be read for this forecast." }
+            }
+        })
+    $Settings.scope.excluded = @(@($Settings.scope.excluded | Where-Object { $_ -and (ConvertTo-ForecastSubscriptionId -Value ([string]$_.subscriptionId)) -notin $subscriptionIds }) + $exclusions)
     $before = @($Settings.scope.subscriptionIds).Count
     $Settings.sources = @($Settings.sources | Where-Object { [string]$_.id -notin $sourceIds })
     $Settings.scope.subscriptionIds = @($Settings.scope.subscriptionIds | Where-Object { (ConvertTo-ForecastSubscriptionId -Value ([string]$_)) -notin $subscriptionIds })
@@ -82,7 +107,7 @@ function Remove-ForecastUnreadableSources {
         if ($named[0].Name) { $Settings.scope.label = Get-ForecastGuidedScopeLabel -Subscriptions $named }
     }
     Save-ForecastSettingsWithFeedback -Root $Root -Settings $Settings
-    Write-FinOpsConsole "  Removed $($sourceIds.Count) live source(s)$(if ($remaining.Count -lt $before) { " and $($before - $remaining.Count) subscription(s) from the scope" }). Refresh to bring the workspace up to date; months already read are kept." -ForegroundColor Cyan
+    Write-FinOpsConsole "  Removed $($sourceIds.Count) live source(s)$(if ($remaining.Count -lt $before) { " and $($before - $remaining.Count) subscription(s) from the scope" }). The report lists them as left out, with the reason. Refresh to bring the workspace up to date; months already read are kept." -ForegroundColor Cyan
 }
 
 function Edit-ForecastSources {
@@ -106,6 +131,8 @@ function Edit-ForecastSources {
         }
         if ($sources.Count -eq 0) { Write-FinOpsConsole '  No export sources yet.' -ForegroundColor DarkGray }
         Write-FinOpsConsole "  Migration boundary: $(if ($settings.migration.boundaryDate) { "$($settings.migration.boundaryDate) (EA before, MCA on or after)" } else { 'not set' })"
+        $leftOut = @($settings.scope.excluded | Where-Object { $_ }).Count
+        if ($leftOut) { Write-FinOpsConsole "  Left out of the scope: $leftOut subscription(s), each with a reason; the report's Checks tab lists them." }
         Write-FinOpsConsole ''
         Write-FinOpsConsole '  D Discover exports in Azure   A Add storage location   L Add local folder   C Add Cost Details (live)' -ForegroundColor DarkGray
         Write-FinOpsConsole '  E Edit   X Remove   M Switch between exports and manual inputs   T Set migration boundary   B Back' -ForegroundColor DarkGray
@@ -270,6 +297,7 @@ function Edit-ForecastScope {
         'L' { $settings.scope.label = ConvertTo-ForecastSafeText (Read-ForecastText -Prompt 'Label shown on reports' -Default $settings.scope.label) 120 }
         default { return }
     }
+    Update-ForecastScopeExclusions -Settings $settings
     Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings
     Wait-ForecastKey
 }
@@ -312,8 +340,8 @@ function Edit-ForecastAssumptions {
         Write-ForecastHeading -Title 'Assumptions'
         $m = $settings.method
         $range = if (Test-ForecastShortHistory -Settings $settings) { "lowest to highest while the lookback is under $($script:ForecastReadyMonths) months (P$($m.lowPercentile) to P$($m.highPercentile) after)" } else { "P$($m.lowPercentile) to P$($m.highPercentile)" }
-        Write-FinOpsConsole "  Method: median growth; sensitivity $range; flag at $($m.anomalyK) x scaled MAD (minimum $(Format-ForecastPercent (Read-ForecastDecimal $m.anomalyMinimumDeviation))); at least $($m.minimumRetained) retained; backtest horizon $($m.backtestHorizon)"
-        Write-FinOpsConsole "  Filters: Marketplace $(if ($settings.filters.includeMarketplace) { 'included' } else { 'excluded' }); tax $(if ($settings.filters.includeTax) { 'included' } else { 'excluded' }); credits never counted"
+        Write-FinOpsConsole "  Method: median growth; sensitivity $range; flag at $($m.anomalyK) x scaled MAD (minimum $(Format-ForecastPercent (Read-ForecastDecimal $m.anomalyMinimumDeviation))); at least $($m.minimumRetained) retained; backtest horizon $($m.backtestHorizon); changes across an agreement change $(if ($m.reviewAgreementChange) { 'need a review' } else { 'aren''t reviewed' })"
+        Write-FinOpsConsole "  Filters: Marketplace $(if ($settings.filters.includeMarketplace) { 'included' } else { 'excluded' })$(if ($settings.filters.showMarketplace) { ', shown in its own report section' }); tax $(if ($settings.filters.includeTax) { 'included' } else { 'excluded' }); credits never counted"
         Write-FinOpsConsole "  Workloads: $($settings.workloads.mode)$(if ($settings.workloads.tagKey) { "; tag key '$($settings.workloads.tagKey)'" })$(if ($settings.workloads.mappingPath) { "; mapping $($settings.workloads.mappingPath)" })"
         Write-FinOpsConsole "  Scheduled items: $(@($settings.scheduledItems).Count)"
         Write-FinOpsConsole '  M Method   F Filters   W Workloads   S Scheduled items   B Back' -ForegroundColor DarkGray
@@ -327,10 +355,12 @@ function Edit-ForecastAssumptions {
                 if ($null -ne (Read-ForecastDecimal $minimum)) { $m.anomalyMinimumDeviation = Format-ForecastDecimal (Read-ForecastDecimal $minimum) }
                 $m.minimumRetained = Read-ForecastInteger -Prompt 'Minimum retained comparisons' -Default $m.minimumRetained -Minimum 1 -Maximum ([int]$settings.period.lookbackMonths - 1)
                 $m.backtestHorizon = Read-ForecastInteger -Prompt 'Backtest horizon in months' -Default $m.backtestHorizon -Minimum 1 -Maximum 12
+                $m.reviewAgreementChange = Read-ForecastYesNo -Prompt 'Ask for a review of each change between months on different agreements (EA and MCA)?' -Default ([bool]$m.reviewAgreementChange)
                 Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings; Wait-ForecastKey
             }
             'F' {
                 $settings.filters.includeMarketplace = Read-ForecastYesNo -Prompt 'Include Marketplace charges?' -Default ([bool]$settings.filters.includeMarketplace)
+                $settings.filters.showMarketplace = Read-ForecastYesNo -Prompt 'Show Marketplace charges in their own report section?' -Default ([bool]$settings.filters.showMarketplace)
                 $settings.filters.includeTax = Read-ForecastYesNo -Prompt 'Include tax lines (manual inputs only; exports carry no tax)?' -Default ([bool]$settings.filters.includeTax)
                 Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings; Wait-ForecastKey
             }

@@ -49,7 +49,7 @@ Describe 'Forecast end to end' {
         $script:Result.TotalCentral | Should -BeLessOrEqual $script:Result.TotalHigh
         $expected = 'backtest.csv', 'forecast-checks.csv', 'forecast-comparisons.csv', 'forecast-fiscal-year.csv', 'forecast-history.csv', 'forecast-monthly.csv',
         'forecast-provenance.csv', 'forecast-reconciliation.csv', 'forecast-report.html', 'forecast-reviews.csv', 'forecast-scheduled-items.csv', 'forecast-summary.txt',
-        'purchases.csv', 'workload-monthly.csv', 'workloads.csv'
+        'purchases.csv', 'read-status.csv', 'workload-monthly.csv', 'workloads.csv'
         foreach ($name in $expected) { Join-Path $script:Result.ReportDirectory $name | Should -Exist }
     }
 
@@ -104,6 +104,43 @@ Describe 'Forecast end to end' {
         # Summing by quarter rounds differently from summing by month, in the 28th digit.
         foreach ($name in 'TotalLow', 'TotalCentral', 'TotalHigh') { [decimal]::Round($sums[$name], 10) | Should -Be ([decimal]::Round([decimal]$quarters.Projection.$name, 10)) -Because $name }
         [decimal]::Round($sums.Actual + $sums.Forecast + $sums.Scheduled, 10) | Should -Be ([decimal]::Round([decimal]$quarters.Projection.TotalCentral, 10))
+    }
+
+    It 'Lists Marketplace charges, the sources read, and purchases in their own report sections' {
+        $exports = Join-Path $TestDrive 'exports-marketplace'
+        foreach ($month in (Get-TestMonthKeys -Last '2026-10' -Count 3)) {
+            $date = "$($month.Substring(5, 2))/01/$($month.Substring(0, 4))"
+            $rows = @(
+                New-SyntheticMonthRows -Month $month -Total 100 -Workload 'app-alpha'
+                New-SyntheticRow -Date $date -Cost '12' -PublisherType 'Marketplace' -PublisherName 'Contoso Synthetic'
+                New-SyntheticRow -Date $date -Cost '30' -ChargeType 'Purchase' -CommitmentId 'ri-synth-monthly' -Frequency 'Recurring'
+            )
+            $null = New-SyntheticExportRun -Root $exports -Kind 'MCA' -Month $month -Scope $script:ProfileScope -Parts @(, $rows)
+        }
+        $settings = New-TestSettings -Root $exports -StartMonth 8
+        $settings.period.lookbackMonths = 3
+        $settings.method.minimumRetained = 1
+        $config = Join-Path $TestDrive 'forecast-config-marketplace.json'
+        $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $config
+        $run = @{ NonInteractive = $true; WorkspaceName = 'marketplace'; WorkspacePath = $script:Workspaces; OutputPath = $script:Reports; AsOf = $script:AsOf; ConfigPath = $config; ErrorAction = 'SilentlyContinue' }
+        $result = Invoke-FinOpsForecast @run
+        $html = Get-Content -LiteralPath (Join-Path $result.ReportDirectory 'forecast-report.html') -Raw
+        (@([regex]::Matches($html, 'id="tabbtn-(?<id>[a-z-]+)"') | ForEach-Object { $_.Groups['id'].Value }) -join ',') | Should -Match 'workloads,marketplace,checks'
+        $html | Should -Match '(?s)<table class="report-table" id="table-marketplace-monthly".*?<tfoot><tr><td>Total</td><td class="numeric-cell">36\.00</td>'
+        $html | Should -Match '<h2 id="read-status-heading" tabindex="-1">Sources read</h2><p class="story-note">1 source configured: 1 with rows\.'
+        $html | Should -Match '<th scope="col" class="numeric-cell">Net change</th>'
+        @(Read-ReportCsv $result.ReportDirectory 'marketplace.csv').Count | Should -Be 3
+        @(Read-ReportCsv $result.ReportDirectory 'read-status.csv').Status | Should -Be 'Rows'
+        @(Read-ReportCsv $result.ReportDirectory 'workloads.csv' | Where-Object { $_.Flags -match 'Purchases only' -and [decimal]$_.PurchasesLast -eq 30 }).Count | Should -Be 1
+        (Get-Content -LiteralPath (Join-Path $result.ReportDirectory 'forecast-summary.txt') -Raw) | Should -Match 'Marketplace charges in the months read total 36\.00'
+
+        # Turning the view off removes its tab and file; the forecast is the same.
+        $settings.filters.showMarketplace = $false
+        $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $config
+        $hidden = Invoke-FinOpsForecast @run -SkipRefresh
+        $hidden.TotalCentral | Should -Be $result.TotalCentral
+        (Get-Content -LiteralPath (Join-Path $hidden.ReportDirectory 'forecast-report.html') -Raw) | Should -Not -Match 'id="tabbtn-marketplace"'
+        Join-Path $hidden.ReportDirectory 'marketplace.csv' | Should -Not -Exist
     }
 
     It 'Saves the vintage with exact amounts' {

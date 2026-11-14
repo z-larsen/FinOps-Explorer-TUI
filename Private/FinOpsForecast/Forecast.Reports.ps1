@@ -47,10 +47,20 @@ function Get-ForecastDisclosure {
     $lines.Add("- Pre-credit cost in the billing currency ($currency): CostInBillingCurrency (EA), costInBillingCurrency (MCA), or BilledCost (FOCUS), described by Microsoft as cost before credits or taxes. Negotiated discounts are reflected; list prices are not used.")
     $lines.Add('- Cost Management data doesn''t include Azure credits or taxes; credits found in inputs are reported but never counted.')
     $lines.Add("- Marketplace charges are $(if ($Settings.filters.includeMarketplace) { 'included' } else { 'excluded' }); tax is $(if ($Settings.filters.includeTax) { 'included' } else { 'excluded' }).")
+    $marketRows = @($Dataset.Marketplace | Where-Object { $_ })
+    if ($Settings.filters.showMarketplace -and $marketRows.Count) {
+        # Amounts in different billing currencies are never added together.
+        $byCurrency = @($marketRows | Group-Object { [string]$_.Currency } | Sort-Object Name | ForEach-Object { $sum = 0d; foreach ($row in $_.Group) { $sum += [decimal]$row.Cost }; Format-ForecastAmount $sum $_.Name })
+        $totalText = if ($byCurrency.Count -gt 1) { "are in $($byCurrency.Count) billing currencies, totaled separately: $($byCurrency -join '; ')" } else { "total $($byCurrency[0])" }
+        $lines.Add("- Marketplace charges in the months read $totalText. They're $(if ($Settings.filters.includeMarketplace) { 'counted in the forecast' } else { 'not in the forecast' }), and they're listed by month and subscription in the Marketplace section and marketplace.csv, for tracking commitments such as an Azure consumption commitment.")
+    }
     $lines.Add("- Source: $(if ($Dataset.Mode -eq 'Manual') { 'manual inputs with recorded evidence' } else { "$(@($Dataset.Runs).Count) selected run-month(s) from $(Get-ForecastSourceCountText -Sources @($Settings.sources)); see forecast-provenance.csv" }).")
+    $readSummary = Get-ForecastReadStatusSummary -Rows @($Dataset.ReadStatus | Where-Object { $_ })
+    if ($readSummary) { $lines.Add("- Sources read: $readSummary See read-status.csv.") }
     $lines.Add('')
     $lines.Add('LOOKBACK AND COMPARISONS')
     $lines.Add("- Window: $($window.First) to $($window.Last) ($(@($window.Rows).Count) months). The latest month eligible as final is $($window.LastEligible) (grace $($Settings.period.graceDays) days after month end).")
+    $lines.Add("- A month counts as final from 00:00 UTC on day $([int]$Settings.period.graceDays + 1) of the next month. Data for the month in progress is an estimate: it's counted as actuals so far, and it never feeds growth or the baseline.")
     if ($Readiness.Status -eq 'Preliminary' -or [int]$Settings.period.lookbackMonths -lt $script:ForecastReadyMonths) {
         $lines.Add("- PRELIMINARY: only $($Settings.period.lookbackMonths) months of history ($([int]$Settings.period.lookbackMonths - 1) month-to-month changes) were used. Growth and its range rest on very few observations, so treat this as an early indication, not a forecast to commit to. A Ready forecast needs $($script:ForecastReadyMonths) months.")
     }
@@ -58,6 +68,11 @@ function Get-ForecastDisclosure {
     $byHand = @($comparisons.Items | Where-Object { -not $_.Flagged -and $_.Review -and $_.Review.Category -eq 'Comparison' }).Count
     $lines.Add("- $($comparisons.Expected) adjacent-month comparisons; $(@($comparisons.Items | Where-Object Retained).Count) retained, $(@($comparisons.Items | Where-Object Status -EQ 'Undefined').Count) undefined, $(@($comparisons.Items | Where-Object Flagged).Count) flagged$(if ($byHand) { ", $byHand reviewed by hand" }).")
     $lines.Add("- Flag rule: |change - median| > max($(Format-ForecastDecimal $comparisons.K) x scaled MAD, $(Format-ForecastPercent $comparisons.MinimumDeviation)). Median $(Format-ForecastPercent $comparisons.Median); threshold $(Format-ForecastPercent $comparisons.Threshold).")
+    $spanning = @($comparisons.Items | Where-Object AgreementChange)
+    if ($spanning.Count) {
+        $how = if (ConvertTo-ForecastSettingSwitch -Value $Settings.method.reviewAgreementChange -Default $true) { 'each needs a review, because EA and MCA prices can differ; until it''s decided, it counts as growth' } else { 'they aren''t reviewed, because that setting is off' }
+        $lines.Add("- $(@($spanning | ForEach-Object { "$($_.FromMonth) to $($_.ToMonth)" }) -join ', ') span a change of agreement: $how.")
+    }
     foreach ($item in @($comparisons.Items | Where-Object { $_.Status -ne 'Defined' -or $_.Flagged -or $_.Review })) {
         $decision = if ($item.Review) { $item.Review.Decision } else { 'n/a' }
         $note = if ($item.Review -and $item.Review.Note) { " Note: $($item.Review.Note)" } else { '' }
@@ -83,11 +98,22 @@ function Get-ForecastDisclosure {
     foreach ($item in @($Model.Schedule.Valid)) {
         $lines.Add("  - $($item.id) ($($item.type), $($item.recurrence) from $($item.startMonth)$(if ($item.endMonth) { " to $($item.endMonth)" })): amount $(Format-ForecastAmount (Read-ForecastDecimal $item.amount) $currency), treatment $($item.baselineTreatment).")
     }
+    $proposed = @($Dataset.Reviews | Where-Object { $_ -and $_.Category -eq 'RecurringPurchase' -and $_.Decision -eq 'Pending' -and $_.PSObject.Properties.Name -contains 'Proposal' -and $_.Proposal })
+    if ($proposed.Count) { $lines.Add("- $($proposed.Count) recurring purchase(s) have no scheduled item, so they aren't in the forecast. Each review proposes a monthly item from the latest month's amount; add it with A in 5 Exceptions.") }
+    if ($Dataset.Mode -eq 'Exports') {
+        $lines.Add('')
+        $lines.Add('WORKLOADS')
+        $lines.Add('- Purchases show on the subscription that pays for them, which may not be where a shared reservation or savings plan is used. Net change adds the change in monthly purchases to the change in 30-day run rate.')
+        $lines.Add('- Month-to-date pace = cost so far in the month in progress / days with data x 30. It''s shown for context and never feeds growth.')
+    }
     $lines.Add('')
     $lines.Add('KNOWN LIMITATIONS')
     $lines.Add('- Microsoft Learn documents PublisherType as Azure for every EA row. EA rows that name a non-Microsoft publisher are treated by review decision, not guessed.')
     $lines.Add('- Learn doesn''t document the sign of Refund rows; signs are kept exactly as exported and positive refunds are flagged.')
     $lines.Add('- RoundingAdjustment rows appear only after an invoice and only at billing scope; subscription-scoped totals can differ slightly from invoices.')
+    if ($Dataset.Mode -eq 'Exports' -and @($Dataset.Months | Where-Object { $_.Status -eq 'Complete' -and -not $_.FirstCharge }).Count) {
+        $lines.Add('- A month whose first charge comes after its first day is flagged, which can show an agreement that started partway through. Months read before first charge dates were recorded don''t have one, so a late start in them isn''t detected.')
+    }
     if ($Readiness.Labels.Count) { $lines.Add("- Labels: $($Readiness.Labels -join ', ').") }
     if ($Backtest) {
         $lines.Add('')
@@ -115,6 +141,8 @@ function Get-ForecastSummaryLines {
     $lines.Add('FinOps Explorer - pre-credit forecast')
     $lines.Add("Generated: $([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm', $script:ForecastInvariant)) UTC; as of $(([datetime]$Model.AsOf).ToString('yyyy-MM-dd', $script:ForecastInvariant))")
     $lines.Add("Scope: $(ConvertTo-ForecastSafeText $ScopeLabel 200)")
+    $readSummary = Get-ForecastReadStatusSummary -Rows @($Dataset.ReadStatus | Where-Object { $_ })
+    if ($readSummary) { $lines.Add("Sources: $readSummary") }
     $lines.Add("Status: $($Readiness.Status)$(if ($statusLabels.Count) { " ($($statusLabels -join ', '))" })")
     $lines.Add('')
     $lines.Add("$($projection.FiscalYear.Label) ($($projection.FiscalYear.FirstMonth) to $($projection.FiscalYear.LastMonth)), pre-credit, $currency")
@@ -157,9 +185,9 @@ function Export-ForecastReport {
     $history = foreach ($row in @($Model.Window.Rows)) {
         $row | Select-Object *, @{ Name = 'NormalizedRunRate'; Expression = { if (Test-ForecastMonthUsable $_) { Get-ForecastNormalizedRunRate $_ } else { $null } } }
     }
-    Write-FinOpsReportFile -Directory $directory -Name 'forecast-history.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $history -Columns @('Month', 'Status', 'Days', 'RunRate', 'NormalizedRunRate', 'Purchase', 'Adjustment', 'Other', 'Headline', 'Credit', 'ExcludedMarketplace', 'ExcludedTax', 'ExcludedUnattributed', 'ExcludedBoundary', 'ExcludedScope', 'ExcludedOverlap', 'DataThrough', 'Provenance', 'Note'))
+    Write-FinOpsReportFile -Directory $directory -Name 'forecast-history.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $history -Columns @('Month', 'Status', 'Days', 'RunRate', 'NormalizedRunRate', 'Purchase', 'Adjustment', 'Other', 'Headline', 'Credit', 'ExcludedMarketplace', 'ExcludedTax', 'ExcludedUnattributed', 'ExcludedBoundary', 'ExcludedScope', 'ExcludedOverlap', 'DataThrough', 'Provenance', 'Note', 'Agreements', 'FirstCharge'))
     $comparisonRows = foreach ($item in @($Model.Comparisons.Items)) { $item | Select-Object *, @{ Name = 'Decision'; Expression = { if ($_.Review) { $_.Review.Decision } else { $null } } }, @{ Name = 'ReviewNote'; Expression = { if ($_.Review) { $_.Review.Note } else { $null } } } }
-    Write-FinOpsReportFile -Directory $directory -Name 'forecast-comparisons.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $comparisonRows -Columns @('Index', 'FromMonth', 'ToMonth', 'FromRunRate', 'ToRunRate', 'Change', 'Status', 'Flagged', 'Deviation', 'Suggestion', 'Decision', 'ReviewNote', 'Retained', 'Reason'))
+    Write-FinOpsReportFile -Directory $directory -Name 'forecast-comparisons.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $comparisonRows -Columns @('Index', 'FromMonth', 'ToMonth', 'FromRunRate', 'ToRunRate', 'Change', 'Status', 'Flagged', 'Deviation', 'Suggestion', 'Decision', 'ReviewNote', 'Retained', 'Reason', 'AgreementChange', 'FromAgreements', 'ToAgreements'))
     Write-FinOpsReportFile -Directory $directory -Name 'forecast-monthly.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $Model.Projection.Rows -Columns @('Month', 'Kind', 'Horizon', 'Days', 'DaysWithData', 'Actual', 'Scheduled', 'ScheduledAlreadyPosted', 'RunRateLow', 'RunRateCentral', 'RunRateHigh', 'TotalLow', 'TotalCentral', 'TotalHigh', 'Note'))
     $fiscal = [pscustomobject]@{
         FiscalYear = $Model.Projection.FiscalYear.Label; FirstMonth = $Model.Projection.FiscalYear.FirstMonth; LastMonth = $Model.Projection.FiscalYear.LastMonth; Currency = $Dataset.Currency
@@ -173,8 +201,15 @@ function Export-ForecastReport {
     Write-FinOpsReportFile -Directory $directory -Name 'forecast-reviews.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $Readiness.Reviews -Columns @('Category', 'Subject', 'Title', 'Required', 'Decision', 'Note', 'DecidedUtc', 'Stale', 'Detail', 'Key'))
     Write-FinOpsReportFile -Directory $directory -Name 'forecast-reconciliation.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $Dataset.Reconciliation -Columns @('Month', 'Source', 'RunId', 'Final', 'Rows', 'RawTotal', 'IncludedHeadline', 'Credits', 'ExcludedTax', 'ExcludedMarketplace', 'ExcludedUnattributed', 'ExcludedBoundary', 'ExcludedScope', 'ExcludedOverlap', 'ExcludedOutsideRange', 'Difference', 'Note'))
     Write-FinOpsReportFile -Directory $directory -Name 'forecast-provenance.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $Dataset.Runs -Columns @('Month', 'Label', 'RunId', 'SourceId', 'Submitted', 'Final', 'Superseded', 'Skipped'))
+    if ($Dataset.Mode -eq 'Exports') {
+        Write-FinOpsReportFile -Directory $directory -Name 'read-status.csv' -Lines (ConvertTo-ForecastCsvLines -Rows @($Dataset.ReadStatus | Where-Object { $_ }) -Columns @('Source', 'Kind', 'Scope', 'SubscriptionId', 'Status', 'MonthsRead', 'Rows', 'Included', 'CheckedMonth', 'FirstCharge', 'LastCharge', 'Detail'))
+    }
+    if ($Settings.filters.showMarketplace -and @($Dataset.Marketplace | Where-Object { $_ }).Count) {
+        $marketRows = foreach ($row in @($Dataset.Marketplace | Where-Object { $_ })) { $row | Select-Object *, @{ Name = 'SubscriptionName'; Expression = { if ($_.SubscriptionId -and $Dataset.SubscriptionNames) { [string]$Dataset.SubscriptionNames[[string]$_.SubscriptionId] } else { '' } } } }
+        Write-FinOpsReportFile -Directory $directory -Name 'marketplace.csv' -Lines (ConvertTo-ForecastCsvLines -Rows @($marketRows) -Columns @('Month', 'SubscriptionId', 'SubscriptionName', 'ChargeType', 'PublisherName', 'Counted', 'Cost', 'Rows', 'Currency'))
+    }
     if ($Workloads) {
-        Write-FinOpsReportFile -Directory $directory -Name 'workloads.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $Workloads.Workloads -Columns @('WorkloadId', 'WorkloadName', 'Source', 'Mapped', 'Flags', 'FirstMonth', 'LastMonth', 'FirstRunRate', 'LastRunRate', 'Change', 'Growth', 'ContributionShare', 'LargestIncreaseMonth', 'LargestIncreaseAmount', 'LookbackSpend', 'LatestMonthSpend', 'CoveredShareFirst', 'CoveredShareLast', 'OnDemandEquivalentLast', 'SubscriptionsLast', 'Notes'))
+        Write-FinOpsReportFile -Directory $directory -Name 'workloads.csv' -Lines (ConvertTo-ForecastCsvLines -Rows $Workloads.Workloads -Columns @('WorkloadId', 'WorkloadName', 'Source', 'Mapped', 'Flags', 'FirstMonth', 'LastMonth', 'FirstRunRate', 'LastRunRate', 'Change', 'Growth', 'ContributionShare', 'LargestIncreaseMonth', 'LargestIncreaseAmount', 'LookbackSpend', 'LatestMonthSpend', 'CoveredShareFirst', 'CoveredShareLast', 'OnDemandEquivalentLast', 'SubscriptionsLast', 'Notes', 'PurchasesFirst', 'PurchasesLast', 'NetChange', 'MonthToDate', 'MonthToDatePace'))
         $long = foreach ($workload in @($Workloads.Workloads)) {
             for ($i = 0; $i -lt $Workloads.Months.Count; $i++) { [pscustomobject]@{ WorkloadId = $workload.WorkloadId; WorkloadName = $workload.WorkloadName; Month = $Workloads.Months[$i]; RunRate = $workload.MonthlyRunRate[$i] } }
         }

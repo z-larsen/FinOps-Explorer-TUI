@@ -466,7 +466,7 @@ Describe 'Cost Details refresh' {
         $settings = New-CostDetailsSettings -Sources $sources
         $settings.scope.subscriptionIds = @($script:SyntheticSubscriptions.A, $script:SyntheticSubscriptions.B, $script:SyntheticSubscriptions.C, $d)
         $settings.scope.label = 'sub-synth-a and 3 more subscriptions'
-        $script:Answers = [Collections.Generic.Queue[string]]::new([string[]]@('U', 'Y', '', 'B'))
+        $script:Answers = [Collections.Generic.Queue[string]]::new([string[]]@('U', 'Y', '', '', 'B'))
         $script:Console = [Collections.Generic.List[string]]::new()
         Mock Read-FinOpsAnswer -ModuleName FinOpsForecast { if ($script:Answers.Count) { $script:Answers.Dequeue() } else { '' } }
         Mock Write-FinOpsConsole -ModuleName FinOpsForecast { $script:Console.Add([string]$Object) }
@@ -483,6 +483,60 @@ Describe 'Cost Details refresh' {
         ($saved.sources.id -join ', ') | Should -Be 'src-cd, src-c, src-d'
         ($saved.scope.subscriptionIds -join ', ') | Should -Be "$($script:SyntheticSubscriptions.A), $($script:SyntheticSubscriptions.C), $d"
         $saved.scope.label | Should -Be 'sub-synth-a and 2 more subscriptions'
+        # Leaving it out records why; a blank reason uses its offer type.
+        $excluded = @($saved.scope.excluded)
+        $excluded.Count | Should -Be 1
+        $excluded[0].subscriptionId | Should -Be $script:SyntheticSubscriptions.B
+        $excluded[0].name | Should -Be 'sub-synth-b'
+        $excluded[0].reason | Should -Match '^Offer type WebDirect: Cost Details reads only EA and MCA subscriptions'
+        $excluded[0].recordedUtc | Should -Not -BeNullOrEmpty
+
+        $status = InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; Settings = $saved } { @((Get-ForecastDataset -Root $Root -Settings $Settings -Reviews @{}).ReadStatus) }
+        (@($status | ForEach-Object { "$($_.Source)=$($_.Status)" }) -join '; ') | Should -Be 'sub-synth-a (live)=Rows; sub-synth-c (live)=Access denied; sub-synth-d (live)=Partly read; sub-synth-b=Left out'
+        @($status | Where-Object Status -EQ 'Partly read')[0].Detail | Should -Match '^2 month\(s\) not read: 2026-10, 2026-11\. .*HTTP 422'
+        @($status | Where-Object Status -EQ 'Left out')[0].Detail | Should -Match '^Offer type WebDirect: .* Left out on \d{4}-\d{2}-\d{2}\.$'
+        InModuleScope FinOpsForecast -Parameters @{ Rows = $status } { Get-ForecastReadStatusSummary -Rows $Rows } | Should -Match '^3 sources configured: 1 with rows, 1 partly read, 1 access denied\. 1 subscription left out of the scope: Offer type WebDirect'
+    }
+
+    It 'Reports a source with no cached runs as not attempted and one whose months are empty as no rows' {
+        InModuleScope FinOpsForecast {
+            $settings = New-ForecastDefaultSettings
+            $settings.sources = @(
+                [pscustomobject]@{ id = 'src-new'; kind = 'LocalFolder'; label = 'New folder'; path = 'synthetic-new' }
+                [pscustomobject]@{ id = 'src-empty'; kind = 'LocalFolder'; label = 'Empty folder'; path = 'synthetic-empty' }
+            )
+            $results = @([pscustomobject]@{ SourceId = 'src-empty'; RunId = 'run-empty'; Status = 'Complete'; Months = @('2026-09'); MonthStats = @([pscustomobject]@{ Month = '2026-09'; Rows = 0L }); Issues = @() })
+            $rows = @(Get-ForecastReadStatus -Settings $settings -Results $results)
+            (@($rows | ForEach-Object { "$($_.Source)=$($_.Status)" }) -join '; ') | Should -Be 'New folder=Not attempted; Empty folder=No rows'
+        }
+    }
+
+    It 'Takes rows and first and last charges only from selected runs, across a source''s groups' {
+        InModuleScope FinOpsForecast {
+            $settings = New-ForecastDefaultSettings
+            $settings.sources = @([pscustomobject]@{ id = 'src'; kind = 'LocalFolder'; label = 'Folder'; path = 'synthetic' })
+            $stat = { param($From, $Through) [pscustomobject]@{ Month = '2026-09'; Rows = 5L; From = [datetime]$From; Through = [datetime]$Through } }
+            # Two scopes in one folder, plus a superseded run for one of them.
+            $results = @(
+                [pscustomobject]@{ SourceId = 'src'; RunKey = 'k-scope-1'; RunId = 'r1'; Status = 'Complete'; Months = @('2026-09'); MonthStats = @(& $stat '2026-09-01' '2026-09-20'); Issues = @() }
+                [pscustomobject]@{ SourceId = 'src'; RunKey = 'k-scope-2'; RunId = 'r2'; Status = 'Complete'; Months = @('2026-09'); MonthStats = @(& $stat '2026-09-05' '2026-09-30'); Issues = @() }
+                [pscustomobject]@{ SourceId = 'src'; RunKey = 'k-superseded'; RunId = 'r3'; Status = 'Complete'; Months = @('2026-09'); MonthStats = @(& $stat '2026-09-15' '2026-09-19'); Issues = @() }
+            )
+            $dataset = [pscustomobject]@{
+                Months = @([pscustomobject]@{ Month = '2026-09'; Status = 'Complete' }); Cells = @(); SubscriptionNames = @{}
+                Runs = @([pscustomobject]@{ Month = '2026-09'; RunKey = 'k-scope-1'; SourceId = 'src' }, [pscustomobject]@{ Month = '2026-09'; RunKey = 'k-scope-2'; SourceId = 'src' })
+            }
+            $row = @(Get-ForecastReadStatus -Settings $settings -Results $results -Dataset $dataset)[0]
+            $row.Rows | Should -Be 10
+            $row.FirstCharge | Should -Be '2026-09-01'
+            $row.LastCharge | Should -Be '2026-09-30'
+            $row.Detail | Should -Not -Match 'late|early'
+            # A run cached before first charges were recorded leaves the first charge unknown, not late.
+            $results[0].MonthStats[0].From = $null
+            $older = @(Get-ForecastReadStatus -Settings $settings -Results $results -Dataset $dataset)[0]
+            $older.FirstCharge | Should -Be ''
+            $older.Detail | Should -Not -Match 'late'
+        }
     }
 
     It 'Reads earlier months when the lookback grows or the fiscal year starts before it, with fromMonth Auto' {

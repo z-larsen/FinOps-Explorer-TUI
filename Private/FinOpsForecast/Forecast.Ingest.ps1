@@ -278,11 +278,12 @@ function Invoke-ForecastRunIngest {
 
                 $stats = $null
                 if (-not $monthStats.TryGetValue($month, [ref]$stats)) {
-                    $stats = @{ Rows = 0L; Total = 0d; Through = [datetime]::MinValue; PositiveRefundRows = 0L; PositiveRefundTotal = 0d; Currencies = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
+                    $stats = @{ Rows = 0L; Total = 0d; From = [datetime]::MaxValue; Through = [datetime]::MinValue; PositiveRefundRows = 0L; PositiveRefundTotal = 0d; Currencies = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
                     $monthStats[$month] = $stats
                 }
                 $stats.Rows += $rows
                 $stats.Total += $cost
+                if ($dateInfo.Date -lt $stats.From) { $stats.From = $dateInfo.Date }
                 if ($dateInfo.Date -gt $stats.Through) { $stats.Through = $dateInfo.Date }
                 [void]$stats.Currencies.Add($currency)
 
@@ -392,6 +393,7 @@ function Invoke-ForecastRunIngest {
     $result.MonthStats = @(foreach ($entry in $monthStats.GetEnumerator()) {
             [pscustomobject]@{
                 Month = $entry.Key; Rows = $entry.Value.Rows; Total = $entry.Value.Total
+                From = if ($entry.Value.From -lt [datetime]::MaxValue) { $entry.Value.From } else { $null }
                 Through = if ($entry.Value.Through -gt [datetime]::MinValue) { $entry.Value.Through } else { $null }
                 PositiveRefundRows = $entry.Value.PositiveRefundRows; PositiveRefundTotal = $entry.Value.PositiveRefundTotal
                 Currencies = @($entry.Value.Currencies | Sort-Object -CaseSensitive)
@@ -422,6 +424,7 @@ function ConvertTo-ForecastCacheRecord {
             $copy = $stat | Select-Object *
             $copy.Total = Format-ForecastDecimal $stat.Total
             $copy.PositiveRefundTotal = Format-ForecastDecimal $stat.PositiveRefundTotal
+            if ($stat.From) { $copy.From = ([datetime]$stat.From).ToString('yyyy-MM-dd', $script:ForecastInvariant) }
             if ($stat.Through) { $copy.Through = ([datetime]$stat.Through).ToString('yyyy-MM-dd', $script:ForecastInvariant) }
             $copy
         })
@@ -449,6 +452,9 @@ function ConvertFrom-ForecastCacheRecord {
         $stat.PositiveRefundTotal = Read-ForecastDecimal -Value $stat.PositiveRefundTotal
         $stat.Rows = [long]$stat.Rows
         $stat.PositiveRefundRows = [long]$stat.PositiveRefundRows
+        # Months read before the first charge date was recorded don't have it.
+        if ($stat.PSObject.Properties.Name -notcontains 'From') { $stat | Add-Member -NotePropertyName From -NotePropertyValue $null }
+        else { $stat.From = ConvertFrom-ForecastDate -Value $stat.From }
         $stat.Through = ConvertFrom-ForecastDate -Value $stat.Through
     }
     foreach ($name in 'Submitted', 'Start', 'End', 'IngestedUtc') { $Record.$name = ConvertFrom-ForecastDate -Value $Record.$name }

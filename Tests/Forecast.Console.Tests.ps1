@@ -80,6 +80,32 @@ Describe 'Forecast console' {
         $session.Model.Growth.Central | Should -Be 0.02
     }
 
+    It 'Adds the proposed scheduled item for a recurring purchase with A in 5 Exceptions' {
+        $exports = Join-Path $TestDrive 'console-proposal'
+        foreach ($month in '2026-08', '2026-09', '2026-10') {
+            $date = "$($month.Substring(5, 2))/01/$($month.Substring(0, 4))"
+            $rows = @(New-SyntheticMonthRows -Month $month -Total 100; New-SyntheticRow -Date $date -Cost '30' -ChargeType 'Purchase' -CommitmentId 'ri-synth-monthly' -Frequency 'Recurring')
+            $null = New-SyntheticExportRun -Root $exports -Kind 'EA' -Month $month -Parts @(, $rows)
+        }
+        $root = Get-Workspace -Name 'console-proposal'
+        $settings = New-TestSettings -Root $exports -StartMonth 8
+        $settings.period.lookbackMonths = 3
+        $settings.method.minimumRetained = 1
+        InModuleScope FinOpsForecast -Parameters @{ Root = $root; Settings = $settings } { Save-ForecastStoredSettings -Root $Root -Settings $Settings }
+        Set-TestAnswers @('R', '', '5', '1', 'A', '', 'B', 'Q')
+        InModuleScope FinOpsForecast -Parameters @{ Root = $root; AsOf = $script:AsOf } { Show-ForecastSetupReview -Root $Root -AsOf $AsOf }
+        Get-RedLines | Should -BeNullOrEmpty
+        $script:Answers.Count | Should -Be 0
+        ($script:Console.Text -join "`n") | Should -Match 'Added scheduled item recurring-[0-9a-f]{8}: 30\.00 a month from 2026-11'
+        $saved = @((InModuleScope FinOpsForecast -Parameters @{ Root = $root } { Get-ForecastStoredSettings -Root $Root }).scheduledItems)
+        $saved.Count | Should -Be 1
+        $saved[0].commitmentId | Should -Be 'ri-synth-monthly'
+        $saved[0].recurrence | Should -Be 'Monthly'
+        $session = InModuleScope FinOpsForecast -Parameters @{ Root = $root; AsOf = $script:AsOf } { Invoke-ForecastEvaluation -Root $Root -AsOf $AsOf }
+        @($session.Readiness.Reviews | Where-Object Category -EQ 'RecurringPurchase').Count | Should -Be 0
+        @($session.Model.ScheduleEffects | Where-Object Month -EQ '2026-12').Count | Should -Be 1
+    }
+
     It 'Keeps a filtered Exceptions list to its own category' {
         $session = [pscustomobject]@{ Readiness = [pscustomobject]@{ Reviews = @() }; Model = [pscustomobject]@{ Comparisons = [pscustomobject]@{ Items = @([pscustomobject]@{ Status = 'Defined' }) } } }
         Set-TestAnswers @('')

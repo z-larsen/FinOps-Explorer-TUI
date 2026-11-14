@@ -540,6 +540,7 @@ function Start-ForecastGuidedSetup {
     if ($kind -ne '3') { $settings.sources = $sources }
     $settings.scope.kind = 'Subscriptions'
     $settings.scope.subscriptionIds = @($Subscriptions | ForEach-Object { [string]$_.Id })
+    Update-ForecastScopeExclusions -Settings $settings
     $settings.scope.label = $label
     $settings.method.minimumRetained = Get-ForecastDefaultMinimumRetained -LookbackMonths $months
     Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings

@@ -481,6 +481,19 @@ after new reservations. That matters most with 3 months of history, where
 nothing is flagged on its own. A forecast is saved only when every required
 check passes.
 
+It also helps with gaps and commitments:
+
+- A recurring purchase without a scheduled item gets a proposed one. Press
+  **A** on its review to add it.
+- A change between months on different agreements, such as EA and MCA, needs
+  a review, because their prices can differ.
+- A month whose charges start partway through is flagged, since that's how a
+  new agreement looks.
+- The report lists what each source's reads returned, and every subscription
+  left out of the scope with its reason.
+- Marketplace charges get their own section for tracking commitments. They're
+  still left out of the forecast by default.
+
 The HTML report looks like the scan report. It opens on an overview written for
 executives and finance: the status and what needs attention, a chart of the
 fiscal year by month, how the central estimate adds up, what drives it, and

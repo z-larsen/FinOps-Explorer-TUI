@@ -135,7 +135,19 @@ function Test-ForecastReadiness {
     $checks.Add((New-ForecastCheck -Id 'KEYS' -Name 'Unique keys and valid assumptions' -Status $(if ($keyIssues.Count) { 'Fail' } else { 'Pass' }) -Detail $(if ($keyIssues.Count) { ($keyIssues.Message | Select-Object -First 5) -join ' ' } else { 'Scheduled items, mappings, and inputs have unique, valid keys.' })))
 
     $boundaryIssue = @($Dataset.Issues | Where-Object Code -EQ 'BND-MISSING')
-    $checks.Add((New-ForecastCheck -Id 'BOUNDARY' -Name 'EA to MCA boundary' -Status $(if ($boundaryIssue.Count) { 'Fail' } else { 'Pass' }) -Detail $(if ($boundaryIssue.Count) { $boundaryIssue[0].Message } elseif ($Settings.migration.boundaryDate) { "Boundary $($Settings.migration.boundaryDate): EA before, MCA on or after." } else { 'Only one agreement type is present.' })))
+    # Only MCA data whose first month starts partway through: the days
+    # before were most likely billed under an earlier agreement, such as EA.
+    $agreementsSeen = @($Dataset.Months | ForEach-Object { @($_.Agreements) } | Where-Object { $_ } | Sort-Object -Unique)
+    $firstMca = @($Dataset.Months | Where-Object { 'MCA' -in @($_.Agreements) } | Sort-Object Month)[0]
+    $partialStart = $firstMca -and 'EA' -notin $agreementsSeen -and @($Dataset.Issues | Where-Object { $_.Code -eq 'RUN-LATESTART' -and $_.Subject -eq $firstMca.Month }).Count -gt 0 -and $firstMca.FirstCharge
+    $boundaryStatus = if ($boundaryIssue.Count) { 'Fail' } elseif ($partialStart) { 'Warn' } else { 'Pass' }
+    $boundaryDetail = if ($boundaryIssue.Count) { $boundaryIssue[0].Message }
+    elseif ($partialStart) {
+        $startDate = ([datetime]$firstMca.FirstCharge).ToString('yyyy-MM-dd', $script:ForecastInvariant)
+        "Only MCA data is loaded, and its first month, $($firstMca.Month), starts on $startDate. The days before were most likely billed under an earlier agreement, such as EA: add that agreement's data and set the migration boundary (T in 1 Source). Until then, $($firstMca.Month) counts only part of its cost, and its change to the next month compares a partial month with a whole one."
+    }
+    elseif ($Settings.migration.boundaryDate) { "Boundary $($Settings.migration.boundaryDate): EA before, MCA on or after." } else { 'Only one agreement type is present.' }
+    $checks.Add((New-ForecastCheck -Id 'BOUNDARY' -Name 'EA to MCA boundary' -Status $boundaryStatus -Detail $boundaryDetail))
 
     $reconciliationIssues = @($Dataset.Issues | Where-Object { $_.Code -eq 'REC-DIFF' -and (& $inWindow $_.Subject) })
     $checks.Add((New-ForecastCheck -Id 'RECONCILE' -Name 'Reconciliation' -Status $(if ($reconciliationIssues.Count) { 'Fail' } else { 'Pass' }) -Detail $(if ($reconciliationIssues.Count) { ($reconciliationIssues.Message | Select-Object -First 3) -join ' ' } else { 'Every selected run-month reconciles: included plus excluded plus credits equals the raw total.' })))

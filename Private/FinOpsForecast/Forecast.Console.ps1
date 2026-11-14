@@ -223,7 +223,15 @@ function Show-ForecastExceptions {
             $suggested = if ($item.Options[$o] -eq $item.Suggested) { '  (suggested)' } else { '' }
             Write-FinOpsConsole ('    {0}  {1}{2}' -f ($o + 1), $item.Options[$o], $suggested)
         }
-        $pick = Read-ForecastText -Prompt 'Option number (blank to cancel)'
+        $proposal = if ($item.PSObject.Properties.Name -contains 'Proposal') { $item.Proposal } else { $null }
+        if ($proposal) { Write-FinOpsConsole "    A  Add the proposed scheduled item: $(Format-ForecastAmount (Read-ForecastDecimal $proposal.amount)) a month from $($proposal.startMonth)" -ForegroundColor Cyan }
+        $pick = Read-ForecastText -Prompt $(if ($proposal) { 'Option number, A to add the proposed item, or blank to cancel' } else { 'Option number (blank to cancel)' })
+        if ($proposal -and $pick -match '^(?i)a$') {
+            $null = Add-ForecastProposedItem -Root $Root -Proposal $proposal
+            Wait-ForecastKey
+            $Session = Invoke-ForecastEvaluation -Root $Root -AsOf $Session.AsOf
+            continue
+        }
         $optionNumber = 0
         if (-not [int]::TryParse($pick, [ref]$optionNumber) -or $optionNumber -lt 1 -or $optionNumber -gt @($item.Options).Count) { continue }
         $decision = $item.Options[$optionNumber - 1]
@@ -316,6 +324,8 @@ function Show-ForecastWorkloads {
             Write-ForecastHeading -Title (ConvertTo-ForecastSafeText $w.WorkloadName 100)
             Write-FinOpsConsole "  ID: $($w.WorkloadId)  Source: $($w.Source)  Flags: $($w.Flags)"
             Write-FinOpsConsole "  Run rate $($w.FirstMonth): $(Format-ForecastAmount $w.FirstRunRate $currency); $($w.LastMonth): $(Format-ForecastAmount $w.LastRunRate $currency)"
+            if ([decimal]$w.PurchasesFirst -ne 0 -or [decimal]$w.PurchasesLast -ne 0) { Write-FinOpsConsole "  Purchases this subscription pays for, $($w.FirstMonth): $(Format-ForecastAmount $w.PurchasesFirst $currency); $($w.LastMonth): $(Format-ForecastAmount $w.PurchasesLast $currency); net change with purchases $(Format-ForecastAmount $w.NetChange $currency)" }
+            if ($null -ne $w.MonthToDatePace) { Write-FinOpsConsole "  $($Session.Workloads.PaceMonth) so far: $(Format-ForecastAmount $w.MonthToDate $currency) in $($Session.Workloads.PaceDays) day(s), a pace of $(Format-ForecastAmount $w.MonthToDatePace $currency) for 30 days" }
             Write-FinOpsConsole "  Lookback spend $(Format-ForecastAmount $w.LookbackSpend $currency); latest month $(Format-ForecastAmount $w.LatestMonthSpend $currency)"
             if ($w.Notes) { Write-FinOpsConsole "  $(ConvertTo-ForecastSafeText $w.Notes 600)" -ForegroundColor Yellow }
             for ($m = 0; $m -lt $Session.Workloads.Months.Count; $m++) { Write-FinOpsConsole ('    {0}  {1,16}' -f $Session.Workloads.Months[$m], (Format-ForecastAmount $w.MonthlyRunRate[$m])) -ForegroundColor DarkGray }
