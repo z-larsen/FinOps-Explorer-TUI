@@ -252,6 +252,8 @@ function Get-ForecastRefreshState {
     $success = @($log | Where-Object Result -EQ 'Succeeded')[-1]
     [pscustomobject]@{
         LastAttemptUtc = $last.AttemptUtc; LastAttemptResult = $last.Result; LastError = $last.Error
+        # Months the last refresh couldn't read again, so their earlier reads are used.
+        LastAttemptKeptEarlier = if ($last.PSObject.Properties['RunsKeptEarlier']) { [int]$last.RunsKeptEarlier } else { 0 }
         LastSuccessUtc = if ($success) { $success.AttemptUtc } else { $null }
         LastSuccess = $success; Log = $log
     }

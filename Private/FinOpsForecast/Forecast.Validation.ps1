@@ -157,6 +157,7 @@ function Test-ForecastReadiness {
     $staleDays = [int]$Settings.period.staleAfterDays
     if ($RefreshState) {
         if ($RefreshState.LastAttemptResult -eq 'Failed') { $freshness.Add("The last refresh failed at $($RefreshState.LastAttemptUtc) ($(ConvertTo-ForecastSafeText $RefreshState.LastError 200)); data from the refresh at $($RefreshState.LastSuccessUtc) is shown.") }
+        elseif ([int]$RefreshState.LastAttemptKeptEarlier) { $freshness.Add("The last refresh, at $($RefreshState.LastAttemptUtc), kept an earlier read for $(Get-ForecastCountText -Count ([int]$RefreshState.LastAttemptKeptEarlier) -Singular 'month' -Plural 'months') it couldn't read again. Refresh again to retry.") }
         $lastSuccess = ConvertFrom-ForecastDate -Value $RefreshState.LastSuccessUtc
         if ($lastSuccess -and ($asOfUtc - $lastSuccess).TotalDays -gt $staleDays) { $freshness.Add("The last successful refresh was $([int]($asOfUtc - $lastSuccess).TotalDays) days ago.") }
     }

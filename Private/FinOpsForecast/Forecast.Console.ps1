@@ -120,7 +120,12 @@ function Show-ForecastSetupReview {
             Write-ForecastSectionLine '5' 'Exceptions' "$pendingRequired required and $pendingOptional optional review(s) pending of $(@($readiness.Reviews).Count)" (Get-ForecastCheckStatus $readiness @('EXCEPTIONS'))
             $reconcileFails = @($readiness.Checks | Where-Object { $_.Id -eq 'RECONCILE' -and $_.Status -eq 'Fail' }).Count
             Write-ForecastSectionLine '6' 'Reconciliation' $(if ($reconcileFails) { 'Some months don''t reconcile' } else { "$(@($dataset.Reconciliation).Count) run-month(s) reconcile to raw totals" }) (Get-ForecastCheckStatus $readiness @('RECONCILE'))
-            $refreshSummary = if ($settings.dataMode -eq 'Manual') { 'Not used for manual inputs' } elseif ($session.RefreshState) { "Last attempt $($session.RefreshState.LastAttemptUtc) ($($session.RefreshState.LastAttemptResult))" } else { 'Never refreshed' }
+            $refreshSummary = if ($settings.dataMode -eq 'Manual') { 'Not used for manual inputs' }
+            elseif ($session.RefreshState) {
+                $keptCount = [int]$session.RefreshState.LastAttemptKeptEarlier
+                "Last attempt $($session.RefreshState.LastAttemptUtc) ($($session.RefreshState.LastAttemptResult)$(if ($keptCount) { "; kept an earlier read for $(Get-ForecastCountText -Count $keptCount -Singular 'month' -Plural 'months')" }))"
+            }
+            else { 'Never refreshed' }
             Write-ForecastSectionLine '7' 'Refresh' $refreshSummary (Get-ForecastCheckStatus $readiness @('FRESHNESS'))
             Write-FinOpsConsole ''
             $projection = $model.Projection
@@ -278,6 +283,12 @@ function Invoke-ForecastConsoleRefresh {
     if ($result.Succeeded) {
         Write-FinOpsConsole "  Refresh succeeded: $($result.RunsRead) run(s) read, $($result.RunsReused) reused from the cache." -ForegroundColor Green
         if ($result.RunsIncomplete) { Write-FinOpsConsole "  $($result.RunsIncomplete) run(s) couldn't be read completely and aren't used. Data checks list the reasons; refresh again to retry them." -ForegroundColor Yellow }
+        $kept = @($result.KeptEarlier | Where-Object { $_ })
+        if ($kept.Count) {
+            $listed = @($kept | Select-Object -First 5 | ForEach-Object { "$($_.Source) $($_.Month)" })
+            $more = if ($kept.Count -gt 5) { ", and $($kept.Count - 5) more" } else { '' }
+            Write-FinOpsConsole "  $(Get-ForecastCountText -Count $kept.Count -Singular 'month' -Plural 'months') couldn't be read again, so the earlier reads are still used: $($listed -join ', ')$more. The warnings above give the reasons. Refresh again to retry them." -ForegroundColor Yellow
+        }
     }
     else { Write-FinOpsConsole "  Refresh failed; the previous data is still in use. $($result.Error)" -ForegroundColor Red }
     Wait-ForecastKey
@@ -292,8 +303,10 @@ function Show-ForecastRefresh {
     else {
         Write-FinOpsConsole "  Last successful refresh: $(if ($state.LastSuccessUtc) { $state.LastSuccessUtc } else { 'none' })"
         foreach ($entry in @($state.Log | Select-Object -Last 10)) {
-            $color = if ($entry.Result -eq 'Succeeded') { 'Green' } else { 'Red' }
-            Write-FinOpsConsole "  $($entry.AttemptUtc)  $($entry.Result)  read $($entry.RunsRead), reused $($entry.RunsReused), $($entry.DurationSeconds)s  $(ConvertTo-ForecastSafeText $entry.Error 160)" -ForegroundColor $color
+            $keptCount = if ($entry.PSObject.Properties['RunsKeptEarlier']) { [int]$entry.RunsKeptEarlier } else { 0 }
+            $color = if ($entry.Result -ne 'Succeeded') { 'Red' } elseif ($keptCount) { 'Yellow' } else { 'Green' }
+            $kept = if ($keptCount) { "  kept an earlier read for $(Get-ForecastCountText -Count $keptCount -Singular 'month' -Plural 'months')" } else { '' }
+            Write-FinOpsConsole "  $($entry.AttemptUtc)  $($entry.Result)  read $($entry.RunsRead), reused $($entry.RunsReused), $($entry.DurationSeconds)s$kept  $(ConvertTo-ForecastSafeText $entry.Error 160)" -ForegroundColor $color
         }
     }
     if (Read-ForecastYesNo -Prompt 'Refresh now?') { Invoke-ForecastConsoleRefresh -Root $Root }

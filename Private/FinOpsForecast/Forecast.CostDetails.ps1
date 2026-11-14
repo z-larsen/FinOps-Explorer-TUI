@@ -258,6 +258,11 @@ function Assert-ForecastCostDetailsAvailable {
     }
 }
 
+function Test-ForecastCostDetailsThrottled {
+    $until = $script:ForecastCostDetailsThrottledUntil
+    return [bool]($until -and [datetime]::UtcNow -lt $until)
+}
+
 function Register-ForecastCostDetailsThrottle {
     # Requests still throttled after Explorer's retries would only draw more
     # 429s, so later chunks in this session wait for the window to end.
@@ -423,7 +428,7 @@ function Invoke-ForecastCostDetailsReport {
     $wait = Get-ForecastCostDetailsRetryAfter -Headers $response.Headers
     try {
         while ($true) {
-            if ([datetime]::UtcNow.AddSeconds($wait) -gt $deadline) { throw "$activity wasn't ready after $([int]($script:ForecastCostDetailsMaxWaitSeconds / 60)) minutes. Try fewer days per report (chunkDays)." }
+            if ([datetime]::UtcNow.AddSeconds($wait) -gt $deadline) { throw "$activity wasn't ready after $([int]($script:ForecastCostDetailsMaxWaitSeconds / 60)) minutes. Cost Management can be slow when it's busy, so refresh again later. If it keeps happening, use fewer days per report (chunkDays)." }
             Write-Progress -Id 83 -ParentId 82 -Activity 'Waiting for Cost Management' -Status "Generating the report for $first to $last"
             Wait-ForecastCostDetails -Seconds $wait
             $poll = Invoke-AzRestMethodWithRetry -Path $pollPath -Method GET -MaxRetries 4 -TimeoutSeconds 120 -MaxRetryWaitSeconds 900

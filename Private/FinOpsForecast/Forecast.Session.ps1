@@ -14,7 +14,9 @@ function Update-ForecastExportCache {
     # Reads every source, reusing cached runs whose manifest, partitions, and
     # ingest profile are unchanged. The new cache replaces the old one only
     # when every source was read; otherwise the previous cache stays in use,
-    # plus any Cost Details months this attempt read completely.
+    # plus any Cost Details months this attempt read completely. A Cost
+    # Details month read before that can't be read again keeps its earlier
+    # read instead, and the refresh goes on to the other sources.
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Settings, [datetime]$Now = [datetime]::UtcNow)
     $started = [datetime]::UtcNow
     $ingestProfile = Get-ForecastIngestProfile -Settings $Settings
@@ -26,6 +28,7 @@ function Update-ForecastExportCache {
     $checkpoint = [Collections.Generic.List[object]]::new()
     $read = 0; $reused = 0; $incomplete = 0
     $notes = [Collections.Generic.List[string]]::new()
+    $keptEarlier = [Collections.Generic.List[object]]::new()
     # Kept months the forecast needs that were read before they were final.
     $unsettledMonths = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
     # Cost Details sources with a fromMonth of Auto read from here.
@@ -68,7 +71,25 @@ function Update-ForecastExportCache {
                     $result = Invoke-ForecastRunIngest -Source $source -Run $run -IngestProfile $sourceProfile
                     if ($cached -and $cached.Status -in 'Complete', 'Unverified' -and $result.Status -notin 'Complete', 'Unverified') {
                         $reason = @($result.Issues | Where-Object Severity -EQ 'Fail' | ForEach-Object Message) -join ' '
-                        throw "Previously usable run $(ConvertTo-ForecastSafeText $run.RunId 80) is now $($result.Status). The previous cache was retained. $reason"
+                        # Reading a live month again generates a new report, and the earlier
+                        # read is still right for the days it covers, so one slow or failed
+                        # report doesn't stop the refresh. Throttling does, since every later
+                        # request would fail too, and so does a changed ingest profile, since
+                        # the earlier read no longer matches the settings.
+                        $earlier = if ($costDetails -and [string]$cached.ProfileHash -eq $sourceProfile.Hash -and -not (Test-ForecastCostDetailsThrottled)) { Get-ForecastCachedRunText -Root $Root -RunKey $run.RunKey }
+                        if ($earlier) {
+                            $label = ConvertTo-ForecastSafeText $source.label 80
+                            $months = @($run.Months) -join ', '
+                            $through = ConvertFrom-ForecastDate -Value $cached.End
+                            $throughText = if ($through) { $through.ToString('yyyy-MM-dd', $script:ForecastInvariant) } else { '' }
+                            $note = "${label}: $months couldn't be read again, so its earlier read$(if ($throughText) { ", through $throughText," }) is still used. $(ConvertTo-ForecastSafeText $reason 400)".Trim()
+                            $notes.Add($note)
+                            Write-Warning $note
+                            $keptEarlier.Add([pscustomobject]@{ Source = $label; Month = $months; Through = $throughText; Reason = ConvertTo-ForecastSafeText $reason 400 })
+                            $runTexts.Add([pscustomobject]@{ RunKey = [string]$run.RunKey; Text = $earlier })
+                            continue
+                        }
+                        throw "Previously usable run $(ConvertTo-ForecastSafeText $run.RunId 80) from $(ConvertTo-ForecastSafeText $source.label 80) is now $($result.Status). The previous cache was retained. $reason"
                     }
                     $text = ConvertTo-ForecastCacheRecord -Result $result | ConvertTo-Json -Depth 20 -Compress
                     $read++
@@ -105,9 +126,9 @@ function Update-ForecastExportCache {
         }
         $meta = [pscustomobject]@{ refreshedUtc = $started.ToString('o', $script:ForecastInvariant); profileHash = $ingestProfile.Hash; runKeys = @($runTexts.RunKey); sourceIds = @($Settings.sources.id) }
         Publish-ForecastCache -Root $Root -RunTexts $runTexts.ToArray() -Meta $meta
-        $entry = [pscustomobject]@{ AttemptUtc = $started.ToString('o', $script:ForecastInvariant); Result = 'Succeeded'; Error = $null; RunsRead = $read; RunsReused = $reused; DurationSeconds = [int]([datetime]::UtcNow - $started).TotalSeconds }
+        $entry = [pscustomobject]@{ AttemptUtc = $started.ToString('o', $script:ForecastInvariant); Result = 'Succeeded'; Error = $null; RunsRead = $read; RunsReused = $reused; RunsKeptEarlier = $keptEarlier.Count; DurationSeconds = [int]([datetime]::UtcNow - $started).TotalSeconds }
         Add-ForecastRefreshLog -Root $Root -Entry $entry
-        return [pscustomobject]@{ Succeeded = $true; Error = $null; RunsRead = $read; RunsReused = $reused; RunsIncomplete = $incomplete; Notes = $notes.ToArray() }
+        return [pscustomobject]@{ Succeeded = $true; Error = $null; RunsRead = $read; RunsReused = $reused; RunsIncomplete = $incomplete; RunsKeptEarlier = $keptEarlier.Count; KeptEarlier = $keptEarlier.ToArray(); Notes = $notes.ToArray() }
     }
     catch {
         Write-Progress -Id 82 -Activity 'Reading export runs' -Completed
@@ -116,7 +137,7 @@ function Update-ForecastExportCache {
         $kept = Save-ForecastRefreshCheckpoint -Root $Root -Existing $existing -RunTexts $checkpoint.ToArray() -IngestProfile $ingestProfile -Settings $Settings -Started $started
         if ($kept) { $message += " $kept Cost Details month(s) read completely in this attempt were kept; refresh again to continue." }
         Add-ForecastRefreshLog -Root $Root -Entry ([pscustomobject]@{ AttemptUtc = $started.ToString('o', $script:ForecastInvariant); Result = 'Failed'; Error = $message; RunsRead = $read; RunsReused = $reused; DurationSeconds = [int]([datetime]::UtcNow - $started).TotalSeconds })
-        return [pscustomobject]@{ Succeeded = $false; Error = $message; RunsRead = $read; RunsReused = $reused; RunsIncomplete = $incomplete; Notes = $notes.ToArray() }
+        return [pscustomobject]@{ Succeeded = $false; Error = $message; RunsRead = $read; RunsReused = $reused; RunsIncomplete = $incomplete; RunsKeptEarlier = 0; KeptEarlier = @(); Notes = $notes.ToArray() }
     }
 }
 

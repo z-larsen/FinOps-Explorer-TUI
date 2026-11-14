@@ -41,17 +41,17 @@ BeforeAll {
         $script:Api = @{
             Next = 0; Operations = @{}; Files = @{}; Posts = [Collections.Generic.List[object]]::new(); Gets = [Collections.Generic.List[string]]::new()
             Waits = [Collections.Generic.List[int]]::new(); DailyCost = '10'; DailyCostByMonth = @{}; Kinds = @{}; PostStatus = @{}; GetStatus = @{}
-            NoData = [Collections.Generic.HashSet[string]]::new(); Extra = @{}; Location = $null; Manifest = $null; ScopeFailure = @{}
+            NoData = [Collections.Generic.HashSet[string]]::new(); Extra = @{}; Location = $null; Manifest = $null; ScopeFailure = @{}; Subscriptions = @{}
         }
         InModuleScope FinOpsForecast { $script:ForecastCostDetailsThrottledUntil = $null }
     }
 
     function Get-CostDetailsCsvBytes {
-        param([string]$Kind, [datetime]$Start, [datetime]$End, [string]$Key)
+        param([string]$Kind, [datetime]$Start, [datetime]$End, [string]$Key, [string]$Subscription = 'A')
         $month = $Start.ToString('yyyy-MM')
         $daily = if ($script:Api.DailyCostByMonth.ContainsKey($month)) { $script:Api.DailyCostByMonth[$month] } else { $script:Api.DailyCost }
         $rows = [Collections.Generic.List[object]]::new()
-        for ($day = $Start; $day -le $End; $day = $day.AddDays(1)) { $rows.Add((New-SyntheticRow -Date $day.ToString('MM/dd/yyyy') -Cost $daily -Workload 'app-alpha')) }
+        for ($day = $Start; $day -le $End; $day = $day.AddDays(1)) { $rows.Add((New-SyntheticRow -Date $day.ToString('MM/dd/yyyy') -Subscription $Subscription -Cost $daily -Workload 'app-alpha')) }
         if ($script:Api.Extra.ContainsKey($Key)) { foreach ($row in @($script:Api.Extra[$Key])) { $rows.Add($row) } }
         return , [Text.Encoding]::UTF8.GetBytes((ConvertTo-SyntheticCsv -Kind $Kind -Rows $rows.ToArray()))
     }
@@ -87,7 +87,9 @@ BeforeAll {
         if ($op.Polled -eq 1) { return [pscustomobject]@{ StatusCode = 202; Content = ''; Headers = @{ 'Retry-After' = @('9') } } }
         if ($script:Api.NoData.Contains($op.Key)) { return [pscustomobject]@{ StatusCode = 200; Content = '{"status":"NoDataFound"}'; Headers = @{} } }
         $kind = if ($script:Api.Kinds.ContainsKey($op.Scope.ToLowerInvariant())) { $script:Api.Kinds[$op.Scope.ToLowerInvariant()] } else { 'MCA' }
-        $bytes = Get-CostDetailsCsvBytes -Kind $kind -Start $op.Start -End $op.End -Key $op.Key
+        # Rows are for subscription A unless the scope is mapped to another.
+        $subscription = if ($script:Api.Subscriptions.ContainsKey($op.Scope.ToLowerInvariant())) { $script:Api.Subscriptions[$op.Scope.ToLowerInvariant()] } else { 'A' }
+        $bytes = Get-CostDetailsCsvBytes -Kind $kind -Start $op.Start -End $op.End -Key $op.Key -Subscription $subscription
         $link = "https://ccmreportstoragewestus.blob.core.windows.net/armreports/$id/part0.csv?sv=2020-05-31&sr=b&sig=SECRETSIG$id"
         $script:Api.Files[$link] = $bytes
         $manifest = [ordered]@{
@@ -673,17 +675,58 @@ Describe 'Cost Details refresh' {
             (Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Now).RunsRead | Should -Be 3
         }
         # Six hours later September (inside its grace period) and October are
-        # read again. September succeeds with corrected amounts; October fails.
+        # read again. September succeeds with corrected amounts; Cost
+        # Management throttles October's request, which stops the refresh.
         $script:Api.DailyCostByMonth['2026-09'] = '11'
-        $script:Api.GetStatus['20261001'] = 500
+        $script:Api.GetStatus['20261001'] = 429
         InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; Settings = $settings; Now = $start.AddHours(6) } {
             $failed = Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Now
             $failed.Succeeded | Should -BeFalse
+            $failed.Error | Should -BeLike '*HTTP 429*'
             $failed.Error | Should -BeLike '*1 Cost Details month(s) read completely in this attempt were kept*'
             $dataset = Get-ForecastDataset -Root $Root -Settings $Settings -Reviews @{}
             @($dataset.Months | Where-Object Month -EQ '2026-09')[0].RunRate | Should -Be 330
             @($dataset.Months | Where-Object Month -EQ '2026-08')[0].RunRate | Should -Be 310
             (Get-ForecastRefreshState -Root $Root).LastAttemptResult | Should -Be 'Failed'
+        }
+    }
+
+    It 'Keeps a month''s earlier read when reading it again fails, and goes on to the other sources' {
+        $scopeB = "/subscriptions/$($script:SyntheticSubscriptions.B)"
+        $script:Api.Subscriptions[$scopeB.ToLowerInvariant()] = 'B'
+        $settings = New-CostDetailsSettings -Sources @((New-CostDetailsSource -Id 'src-a' -From '2026-10' -ChunkDays 31), (New-CostDetailsSource -Id 'src-b' -Scope $scopeB -From '2026-10' -ChunkDays 31))
+        $settings.scope.subscriptionIds = @($script:SyntheticSubscriptions.A, $script:SyntheticSubscriptions.B)
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; Settings = $settings; Now = $script:Now } {
+            (Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Now).RunsRead | Should -Be 4
+        }
+        # Five hours later November is read again: the first source's report
+        # fails, and the second source's has new amounts.
+        $script:Api.ScopeFailure[$script:SubScope.ToLowerInvariant()] = @{ Status = 500; Content = '{"error":{"code":"InternalServerError","message":"Synthetic outage"}}'; From = '20261101' }
+        $script:Api.DailyCostByMonth['2026-11'] = '11'
+        InModuleScope FinOpsForecast -Parameters @{ Root = $script:Root; Settings = $settings; Now = $script:Now.AddHours(5) } {
+            $refresh = Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Now -WarningVariable warnings -WarningAction SilentlyContinue
+            $refresh.Succeeded | Should -BeTrue
+            $refresh.RunsRead | Should -Be 1
+            $refresh.RunsReused | Should -Be 2
+            $refresh.RunsKeptEarlier | Should -Be 1
+            (@($refresh.KeptEarlier) | ForEach-Object { "$($_.Source) $($_.Month) $($_.Through)" }) | Should -Be 'Synthetic src-a 2026-11 2026-11-09'
+            (@($warnings) -join ' ') | Should -BeLike '*Synthetic src-a: 2026-11 couldn''t be read again, so its earlier read, through 2026-11-09, is still used.*HTTP 500*'
+            $dataset = Get-ForecastDataset -Root $Root -Settings $Settings -Reviews @{}
+            # Nine days at 10 from the earlier read, and nine at 11 read again.
+            @($dataset.Months | Where-Object Month -EQ '2026-11')[0].RunRate | Should -Be 189
+            $state = Get-ForecastRefreshState -Root $Root
+            $state.LastAttemptResult | Should -Be 'Succeeded'
+            $state.LastAttemptKeptEarlier | Should -Be 1
+            $model = Invoke-ForecastModel -Dataset $dataset -Settings $Settings -Reviews @{} -AsOf $Now
+            $freshness = @((Test-ForecastReadiness -Dataset $dataset -Model $model -Settings $Settings -RefreshState $state -AsOf $Now).Checks | Where-Object Id -EQ 'FRESHNESS')[0]
+            $freshness.Detail | Should -BeLike '*kept an earlier read for 1 month it couldn''t read again*'
+
+            # A new tag key changes what a read holds, so the earlier read no
+            # longer matches the settings, and the refresh stops instead.
+            $Settings.workloads.tagKey = 'costcenter'
+            $stopped = Update-ForecastExportCache -Root $Root -Settings $Settings -Now $Now.AddHours(1) -WarningAction SilentlyContinue
+            $stopped.Succeeded | Should -BeFalse
+            $stopped.Error | Should -BeLike 'Previously usable run * from Synthetic src-a is now Incomplete.*'
         }
     }
 
