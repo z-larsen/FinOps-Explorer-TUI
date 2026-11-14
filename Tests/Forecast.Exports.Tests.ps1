@@ -6,7 +6,7 @@
 param()
 BeforeAll {
     . (Join-Path $PSScriptRoot 'Forecast.TestHelpers.ps1')
-    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-05T12:00:00', [DateTimeKind]::Utc)
+    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-07T12:00:00', [DateTimeKind]::Utc)
 
     function New-TestRoot { $path = Join-Path $TestDrive ([guid]::NewGuid().ToString('N')); [void][IO.Directory]::CreateDirectory($path); return $path }
 
@@ -275,14 +275,89 @@ Describe 'Export history' {
             $june.Headline | Should -Be 42
         }
 
-        It 'Warns when a final month''s data ends before the month does' {
+        It 'Warns when a final month''s data ends before the month does, naming where the latest charge is' {
             $root = New-TestRoot
             $null = New-SyntheticExportRun -Root $root -Kind 'EA' -Month '2026-09' -Parts @(, @(New-SyntheticRow -Date '09/01/2026' -Cost '5'; New-SyntheticRow -Date '09/19/2026' -Cost '5'))
             $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root)
             $september = Get-TestMonth $history '2026-09'
             $september.Status | Should -Be 'Complete'
-            $september.Note | Should -Match 'Last charge is dated 11 day\(s\) before month end'
-            @($history.Dataset.Issues | Where-Object { $_.Code -eq 'RUN-EARLYEND' -and $_.Severity -eq 'Warn' -and $_.Subject -eq '2026-09' }).Count | Should -Be 1
+            $september.Note | Should -Match 'The latest charge in any source is on 2026-09-19, in ActualCost at /providers/microsoft\.billing/billingaccounts/1234567, 11 day\(s\) before month end\.'
+            $issue = @($history.Dataset.Issues | Where-Object { $_.Code -eq 'RUN-EARLYEND' -and $_.Severity -eq 'Warn' -and $_.Subject -eq '2026-09' })
+            $issue.Count | Should -Be 1
+            $issue[0].Message | Should -Match 'no source has a charge after 2026-09-19, 11 day\(s\) before month end; the latest is in ActualCost at '
+        }
+
+        It 'Warns when a final month''s first charge comes after its first day, naming the subscription' {
+            # An MCA that started partway through the month, with no EA data loaded.
+            $root = New-TestRoot
+            $null = New-SyntheticExportRun -Root $root -Kind 'MCA' -Scope "/subscriptions/$($script:SyntheticSubscriptions.A)" -Month '2026-09' -Parts @(, @(New-SyntheticRow -Date '09/15/2026' -Cost '5'; New-SyntheticRow -Date '09/30/2026' -Cost '5'))
+            $settings = New-TestSettings -Root $root
+            $history = Invoke-TestHistory -Settings $settings
+            $september = Get-TestMonth $history '2026-09'
+            $september.Status | Should -Be 'Complete'
+            $september.FirstCharge | Should -Be ([datetime]'2026-09-15')
+            ($september.Agreements -join '+') | Should -Be 'MCA'
+            $september.Note | Should -Match "The earliest charge in any source is on 2026-09-15, in sub-synth-a \($($script:SyntheticSubscriptions.A)\), 14 day\(s\) after the month starts\."
+            $issue = @($history.Dataset.Issues | Where-Object { $_.Code -eq 'RUN-LATESTART' -and $_.Severity -eq 'Warn' -and $_.Subject -eq '2026-09' })
+            $issue.Count | Should -Be 1
+            $issue[0].Message | Should -Match 'such as a move from EA to MCA'
+            # With only MCA data loaded, the boundary check says why the month is partial.
+            $checks = InModuleScope FinOpsForecast -Parameters @{ Dataset = $history.Dataset; Settings = $settings; AsOf = $script:AsOf } {
+                $model = Invoke-ForecastModel -Dataset $Dataset -Settings $Settings -Reviews @{} -AsOf $AsOf
+                (Test-ForecastReadiness -Dataset $Dataset -Model $model -Settings $Settings -AsOf $AsOf).Checks
+            }
+            $boundary = @($checks | Where-Object Id -EQ 'BOUNDARY')[0]
+            $boundary.Status | Should -Be 'Warn'
+            $boundary.Detail | Should -Match '^Only MCA data is loaded, and its first month, 2026-09, starts on 2026-09-15\. .*set the migration boundary'
+        }
+
+        It 'Keeps first charge dates in the cache, and stays quiet about months read before they were recorded' {
+            # A was read before first charge dates were recorded; B, read since, starts on the 15th.
+            $root = New-TestRoot
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -ExportName 'sub-a' -Scope "/subscriptions/$($script:SyntheticSubscriptions.A)" -Month '2026-09' -Parts @(, @(New-SyntheticRow -Date '09/01/2026' -Cost '5'; New-SyntheticRow -Date '09/30/2026' -Cost '5'))
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -ExportName 'sub-b' -Scope "/subscriptions/$($script:SyntheticSubscriptions.B)" -Month '2026-09' -Parts @(, @(New-SyntheticRow -Date '09/15/2026' -Cost '5' -Subscription 'B'; New-SyntheticRow -Date '09/30/2026' -Cost '5' -Subscription 'B'))
+            $history = InModuleScope FinOpsForecast -Parameters @{ Settings = (New-TestSettings -Root $root -Subscriptions 'A', 'B'); Older = $script:SyntheticSubscriptions.A } {
+                $ingestProfile = Get-ForecastIngestProfile -Settings $Settings
+                $source = $Settings.sources[0]
+                $results = @(foreach ($run in (Find-ForecastExportRuns -Source $source -Blobs (Get-ForecastSourceBlobs -Source $source))) {
+                        $text = ConvertTo-ForecastCacheRecord -Result (Invoke-ForecastRunIngest -Source $source -Run $run -IngestProfile $ingestProfile) | ConvertTo-Json -Depth 20
+                        $record = $text | ConvertFrom-Json -Depth 20
+                        if ($record.OriginalScope -like "*$Older*") { foreach ($stat in @($record.MonthStats)) { $stat.PSObject.Properties.Remove('From') } }
+                        ConvertFrom-ForecastCacheRecord -Record $record
+                    })
+                $selection = Select-ForecastRuns -Results $results -Settings $Settings -Reviews @{}
+                [pscustomobject]@{ Results = $results; Dataset = (Merge-ForecastExportHistory -Results $results -Selection $selection -Settings $Settings -Reviews @{}) }
+            }
+            $newer = @($history.Results | Where-Object { $_.OriginalScope -like "*$($script:SyntheticSubscriptions.B)*" })[0]
+            @($newer.MonthStats)[0].From | Should -Be ([datetime]'2026-09-15')
+            (Get-TestMonth $history '2026-09').FirstCharge | Should -BeNullOrEmpty
+            @($history.Dataset.Issues | Where-Object Code -EQ 'RUN-LATESTART').Count | Should -Be 0 -Because "A's first charge isn't known, so B's late start can't show the month started late"
+        }
+
+        It 'Doesn''t warn when only a quiet subscription''s run ends early' {
+            # One read per subscription: the month runs to its last day even
+            # though one subscription's last charge comes earlier.
+            $root = New-TestRoot
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -ExportName 'sub-a' -Scope "/subscriptions/$($script:SyntheticSubscriptions.A)" -Month '2026-09' -Parts @(, @(New-SyntheticRow -Date '09/01/2026' -Cost '5'; New-SyntheticRow -Date '09/30/2026' -Cost '5'))
+            $null = New-SyntheticExportRun -Root $root -Kind 'EA' -ExportName 'sub-b' -Scope "/subscriptions/$($script:SyntheticSubscriptions.B)" -Month '2026-09' -Parts @(, @(New-SyntheticRow -Date '09/19/2026' -Cost '5' -Subscription 'B'))
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root -Subscriptions 'A', 'B')
+            $september = Get-TestMonth $history '2026-09'
+            $september.Status | Should -Be 'Complete'
+            $september.RunRate | Should -Be 15
+            $september.Note | Should -Not -Match 'latest charge|earliest charge'
+            @($history.Dataset.Issues | Where-Object Code -EQ 'RUN-EARLYEND').Count | Should -Be 0
+            @($history.Dataset.Issues | Where-Object Code -EQ 'RUN-LATESTART').Count | Should -Be 0 -Because 'subscription A has charges from the first day, though B starts on the 19th'
+        }
+
+        It 'Lists one line per scope in the Source check and counts the issues it leaves out' {
+            $line = InModuleScope FinOpsForecast {
+                $issues = @(
+                    foreach ($scope in 'scope-1', 'scope-2') { foreach ($month in '2026-08', '2026-08', '2026-09') { New-ForecastIssue -Code 'RUN-NOELIGIBLE' -Message "No run for $scope." -Subject $month -Scope $scope } }
+                    New-ForecastIssue -Code 'RUN-PARTITION' -Message 'One unscoped issue.' -Subject '2026-09'
+                )
+                Format-ForecastScopeIssues -Issues $issues -Limit 2
+            }
+            $line | Should -BeExactly 'No run for scope-1. The same applies to 2026-09. No run for scope-2. The same applies to 2026-09. (and 1 more issue(s))'
         }
 
         It 'Rejects amortized cost in an actual-cost <Kind> file (<Case>)' -ForEach @(
@@ -631,6 +706,7 @@ Describe 'Export history' {
             $june.Headline | Should -Be 160
             $june.ExcludedBoundary | Should -Be 47
             $june.Status | Should -Be 'Complete'
+            ($june.Agreements -join '+') | Should -Be 'EA+MCA'
             @($history.Dataset.Issues | Where-Object Code -EQ 'BND-MISSING').Count | Should -Be 0
             @($history.Dataset.Reviews | Where-Object Category -EQ 'Boundary').Count | Should -Be 1
             @($history.Dataset.Reconciliation | Where-Object { $_.Difference -ne 0 }).Count | Should -Be 0
@@ -653,7 +729,7 @@ Describe 'Export history' {
     }
 
     Context 'Recurring purchases' {
-        It 'Flags a recurring purchase that no scheduled item covers' {
+        It 'Flags a recurring purchase that no scheduled item covers, and proposes one' {
             $root = New-TestRoot
             foreach ($month in '2026-08', '2026-09', '2026-10') {
                 $date = "$($month.Substring(5, 2))/01/$($month.Substring(0, 4))"
@@ -662,9 +738,93 @@ Describe 'Export history' {
             }
             $settings = New-TestSettings -Root $root
             $history = Invoke-TestHistory -Settings $settings
-            @($history.Dataset.Reviews | Where-Object Category -EQ 'RecurringPurchase').Count | Should -Be 1
-            $settings.scheduledItems = @([pscustomobject]@{ id = 'ri-monthly'; type = 'Renewal'; description = 'Synthetic RI'; startMonth = '2026-11'; endMonth = ''; recurrence = 'Monthly'; amount = '30'; baselineTreatment = 'Additive'; replacedAmount = ''; commitmentId = 'ri-synth-monthly' })
+            $reviews = @($history.Dataset.Reviews | Where-Object Category -EQ 'RecurringPurchase')
+            $reviews.Count | Should -Be 1
+            $reviews[0].Detail | Should -Match 'billed 30\.00 in 2026-10 by sub-synth-a and recurs'
+            $proposal = $reviews[0].Proposal
+            $proposal.id | Should -Match '^recurring-[0-9a-f]{8}$'
+            $proposal.type | Should -Be 'Purchase'
+            $proposal.description | Should -Be 'Recurring purchase, paid by sub-synth-a'
+            $proposal.startMonth | Should -Be '2026-11'
+            $proposal.endMonth | Should -Be ''
+            $proposal.recurrence | Should -Be 'Monthly'
+            $proposal.baselineTreatment | Should -Be 'Additive'
+            $proposal.commitmentId | Should -Be 'ri-synth-monthly'
+            ([decimal]$proposal.amount) | Should -Be 30
+            InModuleScope FinOpsForecast -Parameters @{ Item = $proposal } { @((Test-ForecastScheduledItems -Items @($Item)).Valid).Count } | Should -Be 1 -Because 'a proposal passes the same checks as an item entered by hand'
+            $settings.scheduledItems = @($proposal)
             @((Invoke-TestHistory -Settings $settings).Dataset.Reviews | Where-Object Category -EQ 'RecurringPurchase').Count | Should -Be 0
+        }
+
+        It 'Gives a proposed item an ID that no scheduled item uses' {
+            $root = New-TestRoot
+            $commitment = '/providers/Microsoft.Capacity/reservationOrders/abcdef12-0000-0000-0000-000000000001'
+            foreach ($month in '2026-08', '2026-09', '2026-10') {
+                $date = "$($month.Substring(5, 2))/01/$($month.Substring(0, 4))"
+                $null = New-SyntheticExportRun -Root $root -Kind 'EA' -Month $month -Parts @(, @(New-SyntheticRow -Date $date -Cost '100'; New-SyntheticRow -Date $date -Cost '30' -ChargeType 'Purchase' -CommitmentId $commitment -Frequency 'Recurring'))
+            }
+            $settings = New-TestSettings -Root $root
+            $settings.scheduledItems = @([pscustomobject]@{ id = 'recurring-abcdef12'; type = 'Purchase'; description = 'Another synthetic commitment'; startMonth = '2026-11'; endMonth = ''; recurrence = 'Monthly'; amount = '10'; baselineTreatment = 'Additive'; replacedAmount = ''; commitmentId = 'other-synth-commitment' })
+            $review = @((Invoke-TestHistory -Settings $settings).Dataset.Reviews | Where-Object Category -EQ 'RecurringPurchase')[0]
+            $review.Proposal.id | Should -Be 'recurring-abcdef12-2'
+            $review.Proposal.commitmentId | Should -Be $commitment.ToLowerInvariant()
+        }
+    }
+
+    Context 'Marketplace' {
+        It 'Keeps Marketplace charges for their own view, counted only when the filter includes them' {
+            $root = New-TestRoot
+            $rows = @(
+                New-SyntheticRow -Date '09/01/2026' -Cost '100'
+                New-SyntheticRow -Date '09/02/2026' -Cost '40' -PublisherType 'Marketplace' -PublisherName 'Contoso Synthetic'
+                New-SyntheticRow -Date '09/03/2026' -Cost '25' -PublisherType 'Marketplace' -PublisherName 'Contoso Synthetic' -ChargeType 'Purchase'
+            )
+            $null = New-SyntheticExportRun -Root $root -Kind 'MCA' -Month '2026-09' -Scope $script:ProfileScope -Parts @(, $rows)
+            $settings = New-TestSettings -Root $root
+            $history = Invoke-TestHistory -Settings $settings
+            $market = @($history.Dataset.Marketplace)
+            ($market | ForEach-Object { "$($_.Stream)=$($_.Cost)" }) -join ', ' | Should -Be 'Purchase=25, RunRate=40'
+            @($market | Where-Object Counted).Count | Should -Be 0
+            (Get-TestMonth $history '2026-09').ExcludedMarketplace | Should -Be 65
+            (Get-TestMonth $history '2026-09').Headline | Should -Be 100
+            $settings.filters.includeMarketplace = $true
+            $counted = Invoke-TestHistory -Settings $settings
+            @($counted.Dataset.Marketplace | Where-Object Counted).Count | Should -Be 2
+            (Get-TestMonth $counted '2026-09').Headline | Should -Be 165
+        }
+
+        It 'Keeps Marketplace charges in different currencies apart' {
+            # Excluded Marketplace charges don't take part in the currency check, so the view keeps them apart itself.
+            $root = New-TestRoot
+            $rows = @(
+                New-SyntheticRow -Date '09/01/2026' -Cost '100'
+                New-SyntheticRow -Date '09/02/2026' -Cost '40' -PublisherType 'Marketplace' -PublisherName 'Contoso Synthetic'
+                New-SyntheticRow -Date '09/02/2026' -Cost '15' -PublisherType 'Marketplace' -PublisherName 'Contoso Synthetic' -Currency 'EUR'
+            )
+            $null = New-SyntheticExportRun -Root $root -Kind 'MCA' -Month '2026-09' -Scope $script:ProfileScope -Parts @(, $rows)
+            $history = Invoke-TestHistory -Settings (New-TestSettings -Root $root)
+            (@($history.Dataset.Marketplace | ForEach-Object { "$($_.Currency)=$($_.Cost)" }) -join ', ') | Should -Be 'EUR=15, USD=40'
+            $history.Dataset.Currency | Should -Be 'USD'
+        }
+
+        It 'Attributes included cost to each source even when legacy files share a name' {
+            $roots = @(New-TestRoot; New-TestRoot)
+            $amounts = '100', '200'
+            $subscriptions = 'A', 'B'
+            for ($i = 0; $i -lt 2; $i++) {
+                $null = New-Item -ItemType Directory -Path (Join-Path $roots[$i] 'loose')
+                $csv = ConvertTo-SyntheticCsv -Kind 'EA' -Rows @(New-SyntheticRow -Date '09/01/2026' -Cost $amounts[$i] -Subscription $subscriptions[$i]; New-SyntheticRow -Date '09/30/2026' -Cost '0' -Subscription $subscriptions[$i])
+                [IO.File]::WriteAllText((Join-Path $roots[$i] 'loose\september.csv'), $csv)
+            }
+            $settings = New-TestSettings -Subscriptions 'A', 'B'
+            $settings.sources = @(for ($i = 0; $i -lt 2; $i++) { [pscustomobject]@{ id = "src-$i"; kind = 'LocalFolder'; label = "Folder $i"; path = $roots[$i]; prefix = ''; storageResourceId = ''; container = ''; agreement = 'Auto' } })
+            $reviews = @{}
+            foreach ($item in @((Invoke-TestHistory -Settings $settings).Dataset.Reviews | Where-Object Category -EQ 'Run')) { $reviews += (New-Review $item 'Approved') }
+            $reviews.Count | Should -Be 2
+            $history = Invoke-TestHistory -Settings $settings -Reviews $reviews
+            @($history.Results.RunId | Sort-Object -Unique).Count | Should -Be 1 -Because 'both files have the same run ID'
+            $status = InModuleScope FinOpsForecast -Parameters @{ Settings = $settings; Results = $history.Results; Dataset = $history.Dataset } { @(Get-ForecastReadStatus -Settings $Settings -Results $Results -Dataset $Dataset) }
+            (@($status | ForEach-Object { "$($_.Source)=$($_.Included)" }) -join '; ') | Should -Be 'Folder 0=100; Folder 1=200'
         }
     }
 }

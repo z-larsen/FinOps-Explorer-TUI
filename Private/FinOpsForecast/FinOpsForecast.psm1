@@ -24,7 +24,9 @@ Import-Module (Join-Path $multitoolRoot 'FinOpsMultitool.psm1') -ErrorAction Sto
 $script:ForecastSharedHelpers = @(
     'Write-FinOpsConsole', 'Get-MenuWidth', 'Test-FinOpsRichConsole', 'Move-FinOpsCursorLine', 'Read-FinOpsAnswer',
     'Protect-FinOpsExportText', 'ConvertTo-FinOpsExportCell', 'Get-FinOpsReportRoot', 'Assert-FinOpsReportPath',
-    'New-FinOpsReportDirectory', 'Write-FinOpsReportFile', 'Select-Subscription'
+    'New-FinOpsReportDirectory', 'Write-FinOpsReportFile', 'Select-Subscription',
+    'Get-FinOpsTenantChoice', 'Step-FinOpsTenantPicker', 'Select-FinOpsTenant', 'Connect-FinOpsAzAccount',
+    'Get-FinOpsContextTenantName', 'Get-FinOpsSignInFailure', 'Test-FinOpsSignInExpired', 'Request-FinOpsTenantSignIn'
 )
 $explorerScript = Join-Path $multitoolRoot 'Invoke-FinOpsMultitool.ps1'
 $parseErrors = $null
@@ -42,11 +44,16 @@ foreach ($helperName in $script:ForecastSharedHelpers) {
 }
 Remove-Variable -Name explorerAst, helperDefinitions, matchingDefinitions, parseErrors, parseTokens -ErrorAction SilentlyContinue
 
+# The HTML report shows FinOps Explorer's version, as the scan report does.
+$versionScript = Join-Path $PSScriptRoot '../Get-VersionNumber.ps1'
+if (Test-Path -LiteralPath $versionScript -PathType Leaf) { . $versionScript }
+Remove-Variable -Name versionScript -ErrorAction SilentlyContinue
+
 foreach ($file in @(
         'Forecast.Common.ps1', 'Forecast.Settings.ps1', 'Forecast.Schema.ps1', 'Forecast.Engine.ps1', 'Forecast.Backtest.ps1',
-        'Forecast.Workloads.ps1', 'Forecast.Inputs.ps1', 'Forecast.Sources.ps1', 'Forecast.Ingest.ps1', 'Forecast.Selection.ps1',
+        'Forecast.Workloads.ps1', 'Forecast.Inputs.ps1', 'Forecast.Sources.ps1', 'Forecast.CostDetails.ps1', 'Forecast.Ingest.ps1', 'Forecast.Selection.ps1',
         'Forecast.Assembly.ps1', 'Forecast.Validation.ps1', 'Forecast.State.ps1', 'Forecast.Reports.ps1', 'Forecast.Html.ps1',
-        'Forecast.Session.ps1', 'Forecast.Console.ps1', 'Forecast.ConsoleEdit.ps1'
+        'Forecast.Session.ps1', 'Forecast.Console.ps1', 'Forecast.ConsoleEdit.ps1', 'Forecast.Guided.ps1'
     )) {
     . (Join-Path $PSScriptRoot $file)
 }

@@ -160,6 +160,50 @@ Describe 'Copilot review regressions' {
         }
     }
 
+    It 'Turns the new switches on by default, reads a hand-edited false as off, and checks subscriptions left out of the scope' {
+        InModuleScope FinOpsForecast {
+            $defaults = ConvertTo-ForecastSettings -Loaded ([pscustomobject]@{ schemaVersion = 3 })
+            $defaults.filters.showMarketplace | Should -BeTrue
+            $defaults.method.reviewAgreementChange | Should -BeTrue
+            @($defaults.scope.excluded).Count | Should -Be 0
+            $edited = ConvertTo-ForecastSettings -Loaded ([pscustomobject]@{ schemaVersion = 3; filters = [pscustomobject]@{ showMarketplace = 'false' }; method = [pscustomobject]@{ reviewAgreementChange = 'False' } })
+            $edited.filters.showMarketplace | Should -BeFalse
+            $edited.method.reviewAgreementChange | Should -BeFalse
+
+            $id = '11111111-1111-1111-1111-111111111111'
+            $defaults.scope.subscriptionIds = @($id)
+            $defaults.scope.excluded = @([pscustomobject]@{ subscriptionId = $id; name = 'sub-synth-a'; reason = ' ' })
+            @(Test-ForecastSettings -Settings $defaults | Where-Object Code -EQ 'SET-EXCLUDED').Count | Should -Be 2 -Because 'it has no reason and is also in the scope'
+            # Choosing it for the scope again means it's no longer left out.
+            Update-ForecastScopeExclusions -Settings $defaults
+            @($defaults.scope.excluded).Count | Should -Be 0
+        }
+    }
+
+    It 'Treats a month as final from the fifth day after it ends' {
+        # A daily export writes its last copy of a closed month on day 5, so November is final from the start of December 5.
+        InModuleScope FinOpsForecast {
+            $settings = New-ForecastDefaultSettings
+            Get-ForecastFirstNeededMonth -Settings $settings -AsOf ([datetime]::SpecifyKind([datetime]'2026-12-04T23:59:00', 'Utc')) | Should -Be '2025-11'
+            Get-ForecastFirstNeededMonth -Settings $settings -AsOf ([datetime]::SpecifyKind([datetime]'2026-12-05T00:00:00', 'Utc')) | Should -Be '2025-12'
+        }
+    }
+
+    It 'Reads a stored grace of <Grace> in <Case> as <Expected> days' -ForEach @(
+        @{ Case = 'schema 1, its default'; Version = 1; Grace = 3; Expected = 4 }
+        @{ Case = 'settings without a schema version'; Version = $null; Grace = 3; Expected = 4 }
+        @{ Case = 'schema 2, its default'; Version = 2; Grace = 5; Expected = 4 }
+        @{ Case = 'schema 1, where it was chosen'; Version = 1; Grace = 5; Expected = 5 }
+        @{ Case = 'schema 2, where it was chosen'; Version = 2; Grace = 3; Expected = 3 }
+        @{ Case = 'schema 3'; Version = 3; Grace = 5; Expected = 5 }
+    ) {
+        InModuleScope FinOpsForecast -Parameters @{ Version = $Version; Grace = $Grace; Expected = $Expected } {
+            $loaded = [pscustomobject]@{ period = [pscustomobject]@{ graceDays = $Grace } }
+            if ($null -ne $Version) { $loaded | Add-Member -NotePropertyName schemaVersion -NotePropertyValue $Version }
+            (ConvertTo-ForecastSettings -Loaded $loaded).period.graceDays | Should -Be $Expected
+        }
+    }
+
     It 'Blocks saving when a future pinned window is replaced for preview' {
         $settings = New-TestSettings -Mode 'Manual'
         $settings.period.windowEnd = '2027-01'
@@ -193,6 +237,30 @@ Describe 'Copilot review regressions' {
     ) {
         InModuleScope FinOpsForecast -Parameters @{ Value = $Value; Expected = $Expected } {
             Format-ForecastHtmlCell -Value $Value -Format amount | Should -BeExactly $Expected
+        }
+    }
+
+    It 'Totals Marketplace charges by currency, never adding currencies together' {
+        $html = InModuleScope FinOpsForecast {
+            $rows = @(
+                [pscustomobject]@{ Month = '2026-09'; SubscriptionId = 'sub-synth-1'; ChargeType = 'Usage'; Stream = 'RunRate'; PublisherName = ''; Counted = $false; Cost = 100d; Rows = 1L; Currency = 'USD' }
+                [pscustomobject]@{ Month = '2026-09'; SubscriptionId = 'sub-synth-2'; ChargeType = 'Usage'; Stream = 'RunRate'; PublisherName = ''; Counted = $false; Cost = 100d; Rows = 1L; Currency = 'EUR' }
+            )
+            ConvertTo-ForecastMarketplaceHtml -Rows $rows -SubscriptionNames @{} -Counted $false -Currency 'USD'
+        }
+        $html | Should -Match 'are in 2 billing currencies, totaled separately: 100\.00 EUR; 100\.00 USD'
+        $html | Should -Not -Match '200\.00'
+        $html | Should -Not -Match '<tfoot>' -Because 'a totals row would add the currencies together'
+        $html | Should -Match '<th scope="col">Currency</th>'
+    }
+
+    It 'Fits a chart axis from <Min> to <Max> in round steps of <Step>' -ForEach @(
+        @{ Min = 0; Max = 1.007; Step = 0.2 }
+        @{ Min = 0; Max = 126572.34; Step = 25000 }
+        @{ Min = -0.05; Max = 0.13; Step = 0.05 }
+    ) {
+        InModuleScope FinOpsForecast -Parameters @{ Min = $Min; Max = $Max; Step = $Step } {
+            Get-ForecastChartStep -Min $Min -Max $Max | Should -Be $Step
         }
     }
 

@@ -24,6 +24,47 @@ function Get-ForecastAllReviews {
     return @(@($Dataset.Reviews) + @($Model.Reviews) | Where-Object { $null -ne $_ })
 }
 
+function Format-ForecastScopeIssues {
+    # One line for each scope, with the other months it fails in, so a scope
+    # that fails every month doesn't hide the scopes after it.
+    param([Parameter(Mandatory)][object[]]$Issues, [int]$Limit = 5)
+    $groups = [ordered]@{}
+    foreach ($issue in $Issues) {
+        $scope = $issue.PSObject.Properties['Scope']
+        $key = if ($scope -and $scope.Value) { "scope|$($scope.Value)" } else { "issue|$($groups.Count)" }
+        if (-not $groups.Contains($key)) { $groups[$key] = [Collections.Generic.List[object]]::new() }
+        $groups[$key].Add($issue)
+    }
+    $keys = @($groups.Keys)
+    $lines = for ($i = 0; $i -lt [math]::Min($Limit, $keys.Count); $i++) {
+        $group = $groups[$keys[$i]]
+        $others = @($group | Select-Object -Skip 1 | ForEach-Object Subject | Where-Object { $_ -and $_ -ne $group[0].Subject } | Select-Object -Unique)
+        "$($group[0].Message)$(if ($others.Count) { " The same applies to $($others -join ', ')." })"
+    }
+    $hidden = 0
+    for ($i = $Limit; $i -lt $keys.Count; $i++) { $hidden += $groups[$keys[$i]].Count }
+    return "$(@($lines) -join ' ')$(if ($hidden) { " (and $hidden more issue(s))" })"
+}
+
+function Get-ForecastLiveSourceName {
+    # The name a live source gives its subscription, without " (live)".
+    param([Parameter(Mandatory)][string]$SubscriptionId, $Settings)
+    foreach ($source in @($Settings.sources | Where-Object { $_ -and [string]$_.kind -eq 'CostDetails' })) {
+        if ((ConvertTo-ForecastSubscriptionId -Value ([string]$source.scope)) -eq $SubscriptionId -and $source.label) { return ([string]$source.label) -replace '\s*\(live\)$', '' }
+    }
+    return ''
+}
+
+function Get-ForecastScopeSubscriptionName {
+    # A subscription's name from its cost rows, or else from the live source
+    # that reads it; a subscription that couldn't be read has no rows.
+    param([Parameter(Mandatory)][string]$SubscriptionId, $Dataset, $Settings)
+    $name = [string]$Dataset.SubscriptionNames[$SubscriptionId]
+    if (-not $name) { $name = Get-ForecastLiveSourceName -SubscriptionId $SubscriptionId -Settings $Settings }
+    if ($name) { return "$(ConvertTo-ForecastSafeText $name 60) ($SubscriptionId)" }
+    return $SubscriptionId
+}
+
 function Test-ForecastReadiness {
     param(
         [Parameter(Mandatory)]$Dataset,
@@ -49,7 +90,7 @@ function Test-ForecastReadiness {
     $outside = @($datasetFails | Where-Object { $_ -notin $blocking })
     $runWarnings = @($Dataset.Issues | Where-Object { $_.Severity -eq 'Warn' -and $_.Code -like 'RUN-*' })
     $sourceStatus = if ($blocking.Count) { 'Fail' } elseif ($outside.Count -or $runWarnings.Count) { 'Warn' } else { 'Pass' }
-    $sourceDetail = if ($blocking.Count) { ($blocking.Message | Select-Object -First 5) -join ' ' }
+    $sourceDetail = if ($blocking.Count) { Format-ForecastScopeIssues -Issues $blocking }
     elseif ($outside.Count -or $runWarnings.Count) {
         $parts = @()
         if ($outside.Count) { $parts += "$($outside.Count) issue(s) in months outside the forecast period." }
@@ -62,6 +103,20 @@ function Test-ForecastReadiness {
     $notUsable = @($window.Rows | Where-Object { -not (Test-ForecastMonthUsable $_) })
     $monthDetail = if ($notUsable.Count) { (@($notUsable | ForEach-Object { "$($_.Month) $($_.Status)$(if ($_.Note) { " ($($_.Note))" })" }) -join '; ') } else { "All $($windowMonths.Count) months from $($window.First) to $($window.Last) are complete." }
     $checks.Add((New-ForecastCheck -Id 'MONTHS' -Name "Complete months ($($Settings.period.lookbackMonths) required)" -Status $(if ($notUsable.Count) { 'Fail' } else { 'Pass' }) -Detail $monthDetail))
+
+    # A short lookback is a deliberate choice, so it warns instead of failing,
+    # but the forecast can't be Ready or saved as a vintage.
+    $lookback = [int]$Settings.period.lookbackMonths
+    $preliminary = $lookback -lt $script:ForecastReadyMonths
+    if ($preliminary) { $labels.Add("Preliminary ($lookback months of history)") }
+    $historyDetail = if ($preliminary) { "$lookback months of history give $($lookback - 1) month-to-month changes. A Ready forecast needs $($script:ForecastReadyMonths) months; this one is Preliminary and can't be saved as a vintage." } else { "$lookback months of history." }
+    $checks.Add((New-ForecastCheck -Id 'HISTORY' -Name 'History length' -Status $(if ($preliminary) { 'Warn' } else { 'Pass' }) -Detail $historyDetail))
+
+    # A lookback shorter than the fiscal year so far leaves fiscal-year months
+    # outside the window; without data they'd add zero to the total.
+    $beforeWindow = @($Model.Projection.MissingActualMonths | Where-Object { $_ -and [string]::CompareOrdinal([string]$_, [string]$window.First) -lt 0 })
+    $actualsDetail = if ($beforeWindow.Count) { "No final data for $($beforeWindow -join ', '), which are in $($Model.Projection.FiscalYear.Label) before the lookback window, so they'd count as zero. Read the history back to $($beforeWindow[0]): refresh a live source, or add exports or inputs for those months." } else { 'Every fiscal-year month before the lookback window has final data.' }
+    $checks.Add((New-ForecastCheck -Id 'ACTUALS' -Name 'Fiscal-year actuals before the lookback' -Status $(if ($beforeWindow.Count) { 'Fail' } else { 'Pass' }) -Detail $actualsDetail))
 
     $comparisons = @($Model.Comparisons.Items)
     $missingComparisons = @($comparisons | Where-Object Status -EQ 'MissingData')
@@ -80,7 +135,19 @@ function Test-ForecastReadiness {
     $checks.Add((New-ForecastCheck -Id 'KEYS' -Name 'Unique keys and valid assumptions' -Status $(if ($keyIssues.Count) { 'Fail' } else { 'Pass' }) -Detail $(if ($keyIssues.Count) { ($keyIssues.Message | Select-Object -First 5) -join ' ' } else { 'Scheduled items, mappings, and inputs have unique, valid keys.' })))
 
     $boundaryIssue = @($Dataset.Issues | Where-Object Code -EQ 'BND-MISSING')
-    $checks.Add((New-ForecastCheck -Id 'BOUNDARY' -Name 'EA to MCA boundary' -Status $(if ($boundaryIssue.Count) { 'Fail' } else { 'Pass' }) -Detail $(if ($boundaryIssue.Count) { $boundaryIssue[0].Message } elseif ($Settings.migration.boundaryDate) { "Boundary $($Settings.migration.boundaryDate): EA before, MCA on or after." } else { 'Only one agreement type is present.' })))
+    # Only MCA data whose first month starts partway through: the days
+    # before were most likely billed under an earlier agreement, such as EA.
+    $agreementsSeen = @($Dataset.Months | ForEach-Object { @($_.Agreements) } | Where-Object { $_ } | Sort-Object -Unique)
+    $firstMca = @($Dataset.Months | Where-Object { 'MCA' -in @($_.Agreements) } | Sort-Object Month)[0]
+    $partialStart = $firstMca -and 'EA' -notin $agreementsSeen -and @($Dataset.Issues | Where-Object { $_.Code -eq 'RUN-LATESTART' -and $_.Subject -eq $firstMca.Month }).Count -gt 0 -and $firstMca.FirstCharge
+    $boundaryStatus = if ($boundaryIssue.Count) { 'Fail' } elseif ($partialStart) { 'Warn' } else { 'Pass' }
+    $boundaryDetail = if ($boundaryIssue.Count) { $boundaryIssue[0].Message }
+    elseif ($partialStart) {
+        $startDate = ([datetime]$firstMca.FirstCharge).ToString('yyyy-MM-dd', $script:ForecastInvariant)
+        "Only MCA data is loaded, and its first month, $($firstMca.Month), starts on $startDate. The days before were most likely billed under an earlier agreement, such as EA: add that agreement's data and set the migration boundary (T in 1 Source). Until then, $($firstMca.Month) counts only part of its cost, and its change to the next month compares a partial month with a whole one."
+    }
+    elseif ($Settings.migration.boundaryDate) { "Boundary $($Settings.migration.boundaryDate): EA before, MCA on or after." } else { 'Only one agreement type is present.' }
+    $checks.Add((New-ForecastCheck -Id 'BOUNDARY' -Name 'EA to MCA boundary' -Status $boundaryStatus -Detail $boundaryDetail))
 
     $reconciliationIssues = @($Dataset.Issues | Where-Object { $_.Code -eq 'REC-DIFF' -and (& $inWindow $_.Subject) })
     $checks.Add((New-ForecastCheck -Id 'RECONCILE' -Name 'Reconciliation' -Status $(if ($reconciliationIssues.Count) { 'Fail' } else { 'Pass' }) -Detail $(if ($reconciliationIssues.Count) { ($reconciliationIssues.Message | Select-Object -First 3) -join ' ' } else { 'Every selected run-month reconciles: included plus excluded plus credits equals the raw total.' })))
@@ -90,6 +157,7 @@ function Test-ForecastReadiness {
     $staleDays = [int]$Settings.period.staleAfterDays
     if ($RefreshState) {
         if ($RefreshState.LastAttemptResult -eq 'Failed') { $freshness.Add("The last refresh failed at $($RefreshState.LastAttemptUtc) ($(ConvertTo-ForecastSafeText $RefreshState.LastError 200)); data from the refresh at $($RefreshState.LastSuccessUtc) is shown.") }
+        elseif ([int]$RefreshState.LastAttemptKeptEarlier) { $freshness.Add("The last refresh, at $($RefreshState.LastAttemptUtc), kept an earlier read for $(Get-ForecastCountText -Count ([int]$RefreshState.LastAttemptKeptEarlier) -Singular 'month' -Plural 'months') it couldn't read again. Refresh again to retry.") }
         $lastSuccess = ConvertFrom-ForecastDate -Value $RefreshState.LastSuccessUtc
         if ($lastSuccess -and ($asOfUtc - $lastSuccess).TotalDays -gt $staleDays) { $freshness.Add("The last successful refresh was $([int]($asOfUtc - $lastSuccess).TotalDays) days ago.") }
     }
@@ -105,8 +173,8 @@ function Test-ForecastReadiness {
         foreach ($subscription in @($Dataset.ScopeSubscriptions | Sort-Object)) {
             $months = $Dataset.Population[$subscription]
             $missing = @($windowMonths | Where-Object { -not $months -or -not $months.Contains($_) })
-            if ($missing.Count -eq $windowMonths.Count) { $gaps.Add("$(ConvertTo-ForecastSafeText ([string]$Dataset.SubscriptionNames[$subscription]) 60) ($subscription) has no run-rate data in the window") }
-            elseif ($missing.Count) { $gaps.Add("$subscription has no run-rate data in $($missing.Count) month(s), first $($missing[0])") }
+            if ($missing.Count -eq $windowMonths.Count) { $gaps.Add("$(Get-ForecastScopeSubscriptionName -SubscriptionId $subscription -Dataset $Dataset -Settings $Settings) has no run-rate data in the window") }
+            elseif ($missing.Count) { $gaps.Add("$(Get-ForecastScopeSubscriptionName -SubscriptionId $subscription -Dataset $Dataset -Settings $Settings) has no run-rate data in $($missing.Count) month(s), first $($missing[0])") }
         }
         if ($gaps.Count) { $labels.Add('Partial population') }
         $checks.Add((New-ForecastCheck -Id 'POPULATION' -Name 'Population' -Status $(if ($gaps.Count) { 'Warn' } else { 'Pass' }) -Detail $(if ($gaps.Count) { "Partial population: $(($gaps | Select-Object -First 5) -join '; ')$(if ($gaps.Count -gt 5) { "; and $($gaps.Count - 5) more" })." } else { 'Every subscription in scope has data in every month of the window.' })))
@@ -124,8 +192,8 @@ function Test-ForecastReadiness {
 
     $failed = @($checks | Where-Object Status -EQ 'Fail')
     [pscustomobject]@{
-        Ready = $failed.Count -eq 0
-        Status = if ($failed.Count) { 'NotReady' } else { 'Ready' }
+        Ready = $failed.Count -eq 0 -and -not $preliminary
+        Status = if ($failed.Count) { 'NotReady' } elseif ($preliminary) { 'Preliminary' } else { 'Ready' }
         Checks = $checks.ToArray()
         Labels = $labels.ToArray()
         PendingRequired = $pendingRequired

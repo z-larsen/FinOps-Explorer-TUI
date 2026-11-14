@@ -13,18 +13,26 @@
     BilledCost (FOCUS). Marketplace and tax are excluded by default.
 
     Data comes from Cost Management actual-cost or FOCUS exports in Azure Storage or a
-    local copy of the export container, or from manual monthly inputs. Exports are read
-    only; nothing in Azure is created or changed. Settings, review decisions, cached
-    export history, and saved forecast vintages are kept in a private workspace under
-    the current user's LocalApplicationData directory.
+    local copy of the export container, from ActualCost reports requested live from Cost
+    Management (Cost Details), or from manual monthly inputs. Nothing in Azure is created
+    or changed. Settings, review decisions, cached history, and saved forecast vintages
+    are kept in a private workspace under the current user's LocalApplicationData
+    directory.
+
+    Without -WorkspaceName, an interactive run signs in first and opens a workspace named
+    after the signed-in tenant. A new or empty workspace starts guided setup: where the
+    history comes from, how many months, and the fiscal year's first month.
 
     A forecast is Ready only when every required check passes: 12 or more complete
     months, verified partitions, one currency, unique keys, reconciled totals, and
-    reviewed exceptions. Reports are written to a new private folder each time.
+    reviewed exceptions. With 3 to 11 months it's Preliminary: reported, but never saved
+    as a vintage. Reports are written to a new private folder each time.
 
     .PARAMETER WorkspaceName
-    Name of the workspace that holds settings, reviews, cache, and vintages. The default
-    is 'default'. Use one workspace per customer or scope.
+    Name of the workspace that holds settings, reviews, cache, and vintages. Use one
+    workspace per customer or scope. When omitted, interactive runs use a workspace named
+    after the signed-in tenant; non-interactive runs and runs with -ConfigPath use
+    'default'.
 
     .PARAMETER WorkspacePath
     Optional local parent directory for workspaces. The default is
@@ -45,13 +53,19 @@
     Non-interactive only. Uses the cached export history instead of reading the sources.
 
     .PARAMETER NonInteractive
-    Runs without prompts: refreshes the exports, evaluates the forecast, writes reports,
-    and saves a vintage when the forecast is Ready. When it isn't Ready, reports are
-    labeled NotReady, no vintage is saved, and a non-terminating error lists the
-    failing checks. Review decisions must already be recorded in the workspace.
+    Runs without prompts: refreshes the configured sources, evaluates the forecast, writes
+    reports, and saves a vintage when the forecast is Ready. When it isn't Ready, reports
+    are labeled NotReady (or Preliminary for a lookback under 12 months), no vintage is
+    saved, and a non-terminating error explains why. Review decisions must already be
+    recorded in the workspace.
 
     .PARAMETER Accessible
     Uses numbered prompts without clearing the screen.
+
+    .EXAMPLE
+    Start-FinOpsForecast
+
+    Signs in, opens the signed-in tenant's workspace, and starts guided setup if it's new.
 
     .EXAMPLE
     Start-FinOpsForecast -WorkspaceName contoso-fy27

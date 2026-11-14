@@ -6,7 +6,7 @@
 param()
 BeforeAll {
     . (Join-Path $PSScriptRoot 'Forecast.TestHelpers.ps1')
-    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-05T12:00:00', [DateTimeKind]::Utc)
+    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-07T12:00:00', [DateTimeKind]::Utc)
 
     function New-TestWorkspace {
         $base = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
@@ -28,6 +28,28 @@ Describe 'Workspace state' {
         $root = New-TestWorkspace
         foreach ($path in '../outside.json', 'cache/../../x.json', 'a\b.json', '.hidden') {
             { InModuleScope FinOpsForecast -Parameters @{ Root = $root; Path = $path } { Write-ForecastStateFile -Root $Root -RelativePath $Path -Content '{}' } } | Should -Throw
+        }
+    }
+
+    It 'Retries a cache directory rename while a file is briefly locked' -Skip:(-not $IsWindows) {
+        # Windows refuses to rename a folder while a file in it is open, as
+        # antivirus scanning briefly does after a refresh writes the cache.
+        $base = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $source = Join-Path $base 'staging'
+        [void][IO.Directory]::CreateDirectory($source)
+        $file = Join-Path $source 'run.json'
+        [IO.File]::WriteAllText($file, '{}')
+        $lock = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        $release = [powershell]::Create().AddScript({ param($Handle) Start-Sleep -Milliseconds 400; $Handle.Dispose() }).AddArgument($lock)
+        $pending = $release.BeginInvoke()
+        try {
+            InModuleScope FinOpsForecast -Parameters @{ Source = $source; Destination = (Join-Path $base 'current') } { Move-ForecastStateDirectory -Source $Source -Destination $Destination }
+            Test-Path -LiteralPath (Join-Path $base 'current/run.json') | Should -BeTrue
+        }
+        finally {
+            [void]$pending.AsyncWaitHandle.WaitOne(5000)
+            $release.Dispose()
+            $lock.Dispose()
         }
     }
 

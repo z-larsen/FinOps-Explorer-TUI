@@ -20,6 +20,11 @@ param()
 # - Contribution share   = Change / net change across all workloads;
 #                          undefined when the net change is under 0.01
 # - Largest increase     = the largest positive R(m) - R(m-1), earliest month on ties
+# - Net change           = Change + purchases(last) - purchases(first). Purchases
+#                          are monthly amounts on the subscription that pays for
+#                          them, never scaled to 30 days or spread across workloads.
+# - Month-to-date pace   = cost so far in the month in progress / days with data
+#                          x 30. It's shown only; it never feeds growth.
 # Ties in every ranking fall back to the workload ID in ordinal order.
 ###########################################################################
 
@@ -125,46 +130,79 @@ function Resolve-ForecastWorkload {
     return $resolved
 }
 
+function Get-ForecastMonthToDate {
+    # The month in progress after the lookback window, and how many of its
+    # days have data, for a month-to-date pace. Returns $null without one.
+    # Only a Provisional month qualifies: an Incomplete one can have runs
+    # with different cutoffs, and its earliest cutoff would understate the
+    # days behind a later source's costs.
+    param([Parameter(Mandatory)]$Dataset, [Parameter(Mandatory)]$Window)
+    $after = @($Dataset.Months | Where-Object { $_ -and [string]::CompareOrdinal([string]$_.Month, [string]$Window.Last) -gt 0 -and $_.DataThrough -and $null -ne $_.Headline -and $_.Status -eq 'Provisional' } | Sort-Object Month)
+    if (-not $after.Count) { return $null }
+    $row = $after[-1]
+    $start = Get-ForecastMonthStart -MonthKey ([string]$row.Month)
+    $through = ConvertFrom-ForecastDate -Value $row.DataThrough
+    if (-not $through -or $through.Date -lt $start) { return $null }
+    $days = Get-ForecastDaysInMonth -MonthKey ([string]$row.Month)
+    [pscustomobject]@{ Month = [string]$row.Month; Days = [int][math]::Min($days, [math]::Floor(($through.Date - $start).TotalDays) + 1); DaysInMonth = $days; Through = $through.Date }
+}
+
 function Get-ForecastWorkloadAnalysis {
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Cells,
         [Parameter(Mandatory)][string[]]$Months,
         [Parameter(Mandatory)]$Settings,
         [AllowEmptyCollection()][object[]]$Rules,
-        [Collections.IDictionary]$SubscriptionNames
+        [Collections.IDictionary]$SubscriptionNames,
+        # The month in progress and its days with data, for the month-to-date pace.
+        [string]$PaceMonth,
+        [int]$PaceDays
     )
     $monthIndex = @{}
     for ($i = 0; $i -lt $Months.Count; $i++) { $monthIndex[$Months[$i]] = $i }
     $resolver = New-ForecastWorkloadResolver -Settings $Settings -Rules $Rules -SubscriptionNames $SubscriptionNames
     $workloads = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $purchases = [Collections.Generic.List[object]]::new()
+    $pacing = $PaceMonth -and $PaceDays -gt 0 -and -not $monthIndex.ContainsKey($PaceMonth)
+    $newWorkload = {
+        param($Identity)
+        # Build the per-month sets explicitly; emitting an empty set from a
+        # pipeline would unroll it into nothing.
+        $subscriptionSets = [Collections.Generic.List[object]]::new()
+        $scopeSets = [Collections.Generic.List[object]]::new()
+        foreach ($m in $Months) {
+            $subscriptionSets.Add([Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase))
+            $scopeSets.Add([Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase))
+        }
+        [pscustomobject]@{
+            Id = $Identity.Id; Name = $Identity.Name; Mapped = $Identity.Mapped; Source = $Identity.Source
+            Cost = [decimal[]]::new($Months.Count); Rows = [long[]]::new($Months.Count); Covered = [long[]]::new($Months.Count)
+            OnDemandEquivalent = [decimal[]]::new($Months.Count); Purchases = [decimal[]]::new($Months.Count)
+            MonthToDate = 0d; MonthToDateRows = 0L
+            Subscriptions = $subscriptionSets; Scopes = $scopeSets
+        }
+    }
 
     foreach ($cell in $Cells) {
-        if (-not $monthIndex.ContainsKey([string]$cell.Month)) { continue }
-        $index = $monthIndex[[string]$cell.Month]
-        if ($cell.Stream -eq 'Purchase') {
-            $purchases.Add([pscustomobject]@{ Month = $cell.Month; SubscriptionId = $cell.SubscriptionId; ChargeType = $cell.ChargeType; CommitmentId = $cell.CommitmentId; Cost = [decimal]$cell.Cost })
+        $cellMonth = [string]$cell.Month
+        $isPace = $pacing -and $cellMonth -eq $PaceMonth -and $cell.Stream -eq 'RunRate'
+        if (-not $isPace -and -not $monthIndex.ContainsKey($cellMonth)) { continue }
+        if (-not $isPace -and $cell.Stream -notin 'RunRate', 'Purchase') { continue }
+        $identity = Resolve-ForecastWorkload -Resolver $resolver -Cell $cell
+        $workload = $null
+        if (-not $workloads.TryGetValue($identity.Id, [ref]$workload)) { $workload = & $newWorkload $identity; $workloads[$identity.Id] = $workload }
+        if ($isPace) {
+            $workload.MonthToDate += [decimal]$cell.Cost
+            $workload.MonthToDateRows += [long]$cell.Rows
             continue
         }
-        if ($cell.Stream -ne 'RunRate') { continue }
-        $identity = Resolve-ForecastWorkload -Resolver $resolver -Cell $cell
-        if (-not $workloads.ContainsKey($identity.Id)) {
-            # Build the per-month sets explicitly; emitting an empty set from a
-            # pipeline would unroll it into nothing.
-            $subscriptionSets = [Collections.Generic.List[object]]::new()
-            $scopeSets = [Collections.Generic.List[object]]::new()
-            foreach ($m in $Months) {
-                $subscriptionSets.Add([Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase))
-                $scopeSets.Add([Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase))
-            }
-            $workloads[$identity.Id] = [pscustomobject]@{
-                Id = $identity.Id; Name = $identity.Name; Mapped = $identity.Mapped; Source = $identity.Source
-                Cost = [decimal[]]::new($Months.Count); Rows = [long[]]::new($Months.Count); Covered = [long[]]::new($Months.Count)
-                OnDemandEquivalent = [decimal[]]::new($Months.Count)
-                Subscriptions = $subscriptionSets; Scopes = $scopeSets
-            }
+        $index = $monthIndex[$cellMonth]
+        if ($cell.Stream -eq 'Purchase') {
+            $purchases.Add([pscustomobject]@{ Month = $cell.Month; SubscriptionId = $cell.SubscriptionId; ChargeType = $cell.ChargeType; CommitmentId = $cell.CommitmentId; Cost = [decimal]$cell.Cost })
+            # Shown beside the subscription that pays for it, which may not be where its benefit is used.
+            $workload.Purchases[$index] += [decimal]$cell.Cost
+            continue
         }
-        $workload = $workloads[$identity.Id]
         $workload.Cost[$index] += [decimal]$cell.Cost
         $workload.Rows[$index] += [long]$cell.Rows
         $workload.Covered[$index] += [long]$cell.CoveredRows
@@ -193,8 +231,12 @@ function Get-ForecastWorkloadAnalysis {
         $flags = [Collections.Generic.List[string]]::new()
         $hasFirst = $workload.Rows[0] -gt 0 -or $workload.Cost[0] -ne 0
         $hasLast = $workload.Rows[$last] -gt 0 -or $workload.Cost[$last] -ne 0
+        $hasUsage = @(for ($i = 0; $i -le $last; $i++) { if ($workload.Rows[$i] -gt 0 -or $workload.Cost[$i] -ne 0) { $i } }).Count -gt 0
+        $hasPurchases = @($workload.Purchases | Where-Object { $_ -ne 0 }).Count -gt 0
         if (-not $hasFirst -and $hasLast) { $flags.Add('New') }
         if ($hasFirst -and -not $hasLast) { $flags.Add('Retired') }
+        if (-not $hasUsage -and $hasPurchases) { $flags.Add('Purchases only') }
+        if (-not $hasUsage -and -not $hasPurchases -and ($workload.MonthToDateRows -gt 0 -or $workload.MonthToDate -ne 0)) { $flags.Add('New this month') }
         $notes = [Collections.Generic.List[string]]::new()
         if ($hasFirst -and $hasLast) {
             if (-not $workload.Subscriptions[0].SetEquals($workload.Subscriptions[$last])) {
@@ -210,11 +252,13 @@ function Get-ForecastWorkloadAnalysis {
         $coveredFirst = if ($workload.Rows[0] -gt 0) { [decimal]$workload.Covered[0] / [decimal]$workload.Rows[0] } else { $null }
         $coveredLast = if ($workload.Rows[$last] -gt 0) { [decimal]$workload.Covered[$last] / [decimal]$workload.Rows[$last] } else { $null }
         if ($null -ne $coveredFirst -and $null -ne $coveredLast -and [math]::Abs($coveredLast - $coveredFirst) -ge 0.2d) {
-            $notes.Add("Reservation or savings plan coverage moved from $(Format-ForecastPercent $coveredFirst 0) to $(Format-ForecastPercent $coveredLast 0) of usage rows. Covered usage shows zero actual cost, so part of this change may reflect coverage rather than demand. Purchases are listed separately and never allocated here.")
+            $notes.Add("Reservation or savings plan coverage moved from $(Format-ForecastPercent $coveredFirst 0) to $(Format-ForecastPercent $coveredLast 0) of usage rows. Covered usage shows zero actual cost, so part of this change may reflect coverage rather than demand. Purchases show in their own columns, on the subscription that pays for them, and are never spread across workloads.")
         }
         elseif ($null -ne $coveredLast -and $coveredLast -gt 0) {
             $notes.Add("$(Format-ForecastPercent $coveredLast 0) of usage rows in the last month were covered by a reservation or savings plan and show zero actual cost.")
         }
+        if ($hasPurchases) { $notes.Add('Its purchases are those this subscription pays for; a shared reservation or savings plan can cover usage elsewhere.') }
+        $purchasesFirst = $workload.Purchases[0]; $purchasesLast = $workload.Purchases[$last]
         $results.Add([pscustomobject]@{
                 WorkloadId = $workload.Id; WorkloadName = $workload.Name; Source = $workload.Source; Mapped = $workload.Mapped
                 Flags = ($flags -join ', '); FirstMonth = $Months[0]; LastMonth = $Months[$last]
@@ -225,6 +269,10 @@ function Get-ForecastWorkloadAnalysis {
                 OnDemandEquivalentLast = $workload.OnDemandEquivalent[$last]
                 SubscriptionsLast = (@($workload.Subscriptions[$last] | Sort-Object -CaseSensitive) -join ';')
                 Notes = ($notes -join ' '); MonthlyRunRate = $rates
+                # Purchases are monthly amounts, so they aren't scaled to 30 days.
+                PurchasesFirst = $purchasesFirst; PurchasesLast = $purchasesLast; NetChange = $change + $purchasesLast - $purchasesFirst
+                MonthToDate = if ($pacing) { $workload.MonthToDate } else { $null }
+                MonthToDatePace = if ($pacing) { $workload.MonthToDate * 30d / [decimal]$PaceDays } else { $null }
             })
     }
     # Different workloads can share a display name, such as two subscriptions
@@ -248,6 +296,7 @@ function Get-ForecastWorkloadAnalysis {
         Months = $Months; NetChange = $netChange; Workloads = $byChange
         UnmappedCount = @($results | Where-Object { -not $_.Mapped }).Count
         Purchases = $purchases.ToArray()
+        PaceMonth = if ($pacing) { $PaceMonth } else { $null }; PaceDays = if ($pacing) { $PaceDays } else { $null }
     }
 }
 

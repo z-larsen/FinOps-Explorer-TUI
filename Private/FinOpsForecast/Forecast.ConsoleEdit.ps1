@@ -14,6 +14,21 @@ param()
 # that apply, so problems surface where they're fixed.
 ###########################################################################
 
+function Add-ForecastProposedItem {
+    # Adds a proposed scheduled item, such as a recurring purchase found in
+    # the history, after the same checks as an item entered by hand.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Proposal)
+    $settings = Get-ForecastStoredSettings -Root $Root
+    $items = @($settings.scheduledItems | Where-Object { $_ })
+    $check = Test-ForecastScheduledItems -Items @($items + $Proposal)
+    $problems = @($check.Issues | Where-Object { $_.Subject -eq $Proposal.id -or $_.Code -eq 'SCH-DUPLICATE' })
+    if ($problems.Count) { foreach ($problem in $problems) { Write-FinOpsConsole "  ! $($problem.Message)" -ForegroundColor Yellow }; return $false }
+    $settings.scheduledItems = @($items + $Proposal)
+    Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings
+    Write-FinOpsConsole "  Added scheduled item $($Proposal.id): $(Format-ForecastAmount (Read-ForecastDecimal $Proposal.amount)) a month from $($Proposal.startMonth), with no end month. If the commitment ends sooner, set its end month in 4 Assumptions, S." -ForegroundColor Cyan
+    return $true
+}
+
 function Save-ForecastSettingsWithFeedback {
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Settings)
     Save-ForecastStoredSettings -Root $Root -Settings $Settings
@@ -28,6 +43,73 @@ function New-ForecastSourceId {
     return $base
 }
 
+function Test-ForecastSourceShown {
+    # Shows why a source isn't valid. Returns $true when it is.
+    param([Parameter(Mandatory)]$Source)
+    $problems = @(Test-ForecastSourceDefinition -Source $Source)
+    foreach ($problem in $problems) { Write-FinOpsConsole "  ! $($problem.Message)" -ForegroundColor Yellow }
+    return $problems.Count -eq 0
+}
+
+function Read-ForecastStorageSource {
+    # Prompts for an export's storage location. Returns $null when it isn't valid.
+    $resourceId = Read-ForecastText -Prompt 'Storage account resource ID (/subscriptions/.../storageAccounts/<name>)'
+    $container = Read-ForecastText -Prompt 'Container'
+    $prefix = Read-ForecastText -Prompt 'Folder path to the export (root folder/export name)' -Default ''
+    $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, MCA, or FOCUS' -Valid @('AUTO', 'EA', 'MCA', 'FOCUS') -Default 'AUTO'
+    $source = [pscustomobject]@{ id = New-ForecastSourceId -Seed $resourceId; kind = 'AzureStorage'; label = Read-ForecastText -Prompt 'Label' -Default $prefix; storageResourceId = ([string]$resourceId).Trim(); container = ([string]$container).Trim(); prefix = ([string]$prefix).Trim('/'); path = ''; agreement = $(if ($agreement -eq 'AUTO' -or -not $agreement) { 'Auto' } else { $agreement }) }
+    if (-not (Test-ForecastSourceShown -Source $source)) { return $null }
+    return $source
+}
+
+function Read-ForecastLocalSource {
+    # Prompts for a local copy of an export container. Returns $null when it isn't valid.
+    $path = Read-ForecastText -Prompt 'Local folder that holds a copy of the export container'
+    $prefix = Read-ForecastText -Prompt 'Folder path inside it to the export (blank for all)' -Default ''
+    $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, MCA, or FOCUS' -Valid @('AUTO', 'EA', 'MCA', 'FOCUS') -Default 'AUTO'
+    $source = [pscustomobject]@{ id = New-ForecastSourceId -Seed $path; kind = 'LocalFolder'; label = Read-ForecastText -Prompt 'Label' -Default ([IO.Path]::GetFileName(([string]$path).TrimEnd('\', '/'))); storageResourceId = ''; container = ''; prefix = ([string]$prefix).Trim('/'); path = ([string]$path).Trim(); agreement = $(if ($agreement -eq 'AUTO' -or -not $agreement) { 'Auto' } else { $agreement }) }
+    if (-not (Test-ForecastSourceShown -Source $source)) { return $null }
+    return $source
+}
+
+function Remove-ForecastUnreadableSources {
+    # Lists the live sources Cost Details turned down for their offer type
+    # and, once confirmed, removes them and their subscriptions from the scope.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Settings)
+    Write-FinOpsConsole '  Checking the last refresh...' -ForegroundColor DarkGray
+    $cache = $null
+    try { $cache = Get-ForecastCache -Root $Root }
+    catch { Write-FinOpsConsole "  ! The last refresh couldn't be read: $(ConvertTo-ForecastSafeText $_.Exception.Message 200)" -ForegroundColor Yellow; return }
+    $unreadable = @(Get-ForecastUnreadableSources -Settings $Settings -Results @(if ($cache) { $cache.Results }))
+    if (-not $unreadable.Count) { Write-FinOpsConsole '  The last refresh didn''t turn down any live source for its offer type.' -ForegroundColor DarkGray; return }
+    Write-FinOpsConsole "  Cost Details reads only EA and MCA subscriptions, so the last refresh couldn't read these $($unreadable.Count):"
+    foreach ($item in $unreadable) { Write-FinOpsConsole "    $($item.Name)  (offer type $($item.Offer))" }
+    if (-not (Read-ForecastYesNo -Prompt 'Remove their live sources and take them out of the scope?')) { return }
+    # Each subscription left out keeps a reason, which the report lists.
+    $reason = ConvertTo-ForecastSafeText (Read-ForecastText -Prompt 'Reason for leaving them out (Enter for each one''s offer type)') 300
+    $sourceIds = @($unreadable | ForEach-Object { [string]$_.Source.id })
+    $subscriptionIds = @($unreadable | ForEach-Object SubscriptionId | Where-Object { $_ })
+    $recorded = [datetime]::UtcNow.ToString('o', $script:ForecastInvariant)
+    $exclusions = @($unreadable | Where-Object SubscriptionId | ForEach-Object {
+            [pscustomobject]@{
+                subscriptionId = [string]$_.SubscriptionId; name = [string]$_.Name; recordedUtc = $recorded
+                reason = if ($reason) { $reason } else { "Offer type $($_.Offer): Cost Details reads only EA and MCA subscriptions, so its cost can't be read for this forecast." }
+            }
+        })
+    $Settings.scope.excluded = @(@($Settings.scope.excluded | Where-Object { $_ -and (ConvertTo-ForecastSubscriptionId -Value ([string]$_.subscriptionId)) -notin $subscriptionIds }) + $exclusions)
+    $before = @($Settings.scope.subscriptionIds).Count
+    $Settings.sources = @($Settings.sources | Where-Object { [string]$_.id -notin $sourceIds })
+    $Settings.scope.subscriptionIds = @($Settings.scope.subscriptionIds | Where-Object { (ConvertTo-ForecastSubscriptionId -Value ([string]$_)) -notin $subscriptionIds })
+    $remaining = @($Settings.scope.subscriptionIds)
+    # A label from guided setup ("<name> and N more subscriptions") would still count the removed ones.
+    if ($remaining.Count -and $remaining.Count -lt $before -and [string]$Settings.scope.label -match "^.+ and $($before - 1) more subscriptions?$") {
+        $named = @($remaining | ForEach-Object { [pscustomobject]@{ Name = Get-ForecastLiveSourceName -SubscriptionId (ConvertTo-ForecastSubscriptionId -Value ([string]$_)) -Settings $Settings } })
+        if ($named[0].Name) { $Settings.scope.label = Get-ForecastGuidedScopeLabel -Subscriptions $named }
+    }
+    Save-ForecastSettingsWithFeedback -Root $Root -Settings $Settings
+    Write-FinOpsConsole "  Removed $($sourceIds.Count) live source(s)$(if ($remaining.Count -lt $before) { " and $($before - $remaining.Count) subscription(s) from the scope" }). The report lists them as left out, with the reason. Refresh to bring the workspace up to date; months already read are kept." -ForegroundColor Cyan
+}
+
 function Edit-ForecastSources {
     param([Parameter(Mandatory)][string]$Root)
     while ($true) {
@@ -37,33 +119,56 @@ function Edit-ForecastSources {
         $sources = @($settings.sources)
         for ($i = 0; $i -lt $sources.Count; $i++) {
             $s = $sources[$i]
-            $location = if ($s.kind -eq 'LocalFolder') { $s.path } else { "$(([string]$s.storageResourceId) -replace '^.*/storageAccounts/', '')/$($s.container)/$($s.prefix)" }
+            $location = switch ([string]$s.kind) {
+                'LocalFolder' { $s.path }
+                'CostDetails' {
+                    $range = if ($s.fromMonth -or $s.toMonth) { ", $(if ($s.fromMonth -eq 'Auto') { 'auto' } elseif ($s.fromMonth) { $s.fromMonth } else { 'earliest' }) to $(if ($s.toMonth) { $s.toMonth } else { 'current' })" } else { '' }
+                    "$(Get-ForecastCostDetailsChunkDays -Source $s)-day reports$range | $((([string]$s.scope).Trim('/') -split '/' | Select-Object -Last 2) -join '/')"
+                }
+                default { "$(([string]$s.storageResourceId) -replace '^.*/storageAccounts/', '')/$($s.container)/$($s.prefix)" }
+            }
             Write-FinOpsConsole ('  {0,2}  {1,-12} {2,-6} {3}  ({4})' -f ($i + 1), $s.kind, $s.agreement, (ConvertTo-ForecastSafeText $location 70), (ConvertTo-ForecastSafeText $s.label 40))
         }
         if ($sources.Count -eq 0) { Write-FinOpsConsole '  No export sources yet.' -ForegroundColor DarkGray }
         Write-FinOpsConsole "  Migration boundary: $(if ($settings.migration.boundaryDate) { "$($settings.migration.boundaryDate) (EA before, MCA on or after)" } else { 'not set' })"
+        $leftOut = @($settings.scope.excluded | Where-Object { $_ }).Count
+        if ($leftOut) { Write-FinOpsConsole "  Left out of the scope: $leftOut subscription(s), each with a reason; the report's Checks tab lists them." }
         Write-FinOpsConsole ''
-        Write-FinOpsConsole '  D Discover exports in Azure   A Add storage location   L Add local folder   E Edit   X Remove' -ForegroundColor DarkGray
-        Write-FinOpsConsole '  M Switch between exports and manual inputs   T Set migration boundary   B Back' -ForegroundColor DarkGray
-        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid @('D', 'A', 'L', 'E', 'X', 'M', 'T', 'B') -Default 'B'
+        Write-FinOpsConsole '  D Discover exports in Azure   A Add storage location   L Add local folder   C Add Cost Details (live)' -ForegroundColor DarkGray
+        Write-FinOpsConsole '  E Edit   X Remove   M Switch between exports and manual inputs   T Set migration boundary   B Back' -ForegroundColor DarkGray
+        $live = @($sources | Where-Object { [string]$_.kind -eq 'CostDetails' }).Count -gt 0
+        if ($live) { Write-FinOpsConsole '  U Remove live sources Cost Details can''t read, such as Visual Studio subscriptions' -ForegroundColor DarkGray }
+        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid (@('D', 'A', 'L', 'C', 'E', 'X', 'M', 'T', 'B') + @(if ($live) { 'U' })) -Default 'B'
         switch ($choice) {
             'D' { Add-ForecastDiscoveredSources -Root $Root }
+            'U' { Remove-ForecastUnreadableSources -Root $Root -Settings $settings; Wait-ForecastKey }
             'A' {
-                $resourceId = Read-ForecastText -Prompt 'Storage account resource ID (/subscriptions/.../storageAccounts/<name>)'
-                $container = Read-ForecastText -Prompt 'Container'
-                $prefix = Read-ForecastText -Prompt 'Folder path to the export (root folder/export name)' -Default ''
-                $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, MCA, or FOCUS' -Valid @('AUTO', 'EA', 'MCA', 'FOCUS') -Default 'AUTO'
-                $source = [pscustomobject]@{ id = New-ForecastSourceId -Seed $resourceId; kind = 'AzureStorage'; label = Read-ForecastText -Prompt 'Label' -Default $prefix; storageResourceId = $resourceId.Trim(); container = $container.Trim(); prefix = $prefix.Trim('/'); path = ''; agreement = $(if ($agreement -eq 'AUTO') { 'Auto' } else { $agreement }) }
-                $problems = @(Test-ForecastSourceDefinition -Source $source)
-                if ($problems.Count) { foreach ($p in $problems) { Write-FinOpsConsole "  ! $($p.Message)" -ForegroundColor Yellow }; Wait-ForecastKey; continue }
+                $source = Read-ForecastStorageSource
+                if (-not $source) { Wait-ForecastKey; continue }
                 $settings.sources = @($sources + $source)
                 Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings; Wait-ForecastKey
             }
             'L' {
-                $path = Read-ForecastText -Prompt 'Local folder that holds a copy of the export container'
-                $prefix = Read-ForecastText -Prompt 'Folder path inside it to the export (blank for all)' -Default ''
-                $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, MCA, or FOCUS' -Valid @('AUTO', 'EA', 'MCA', 'FOCUS') -Default 'AUTO'
-                $source = [pscustomobject]@{ id = New-ForecastSourceId -Seed $path; kind = 'LocalFolder'; label = Read-ForecastText -Prompt 'Label' -Default ([IO.Path]::GetFileName($path.TrimEnd('\', '/'))); storageResourceId = ''; container = ''; prefix = $prefix.Trim('/'); path = $path.Trim(); agreement = $(if ($agreement -eq 'AUTO') { 'Auto' } else { $agreement }) }
+                $source = Read-ForecastLocalSource
+                if (-not $source) { Wait-ForecastKey; continue }
+                $settings.sources = @($sources + $source)
+                Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings; Wait-ForecastKey
+            }
+            'C' {
+                Write-FinOpsConsole '  Cost Details asks Cost Management for ActualCost reports at a subscription or billing scope.' -ForegroundColor DarkGray
+                Write-FinOpsConsole '  It reaches 13 months back, needs Cost Management read access there, and changes nothing in Azure.' -ForegroundColor DarkGray
+                $scope = Read-ForecastText -Prompt 'Scope (/subscriptions/<id> or /providers/Microsoft.Billing/billingAccounts/<id>[/billingProfiles/<id>])'
+                $days = Read-ForecastText -Prompt 'Days per report, 1 to 31 (use 1 for very large scopes)' -Default '7'
+                $from = Read-ForecastText -Prompt 'First month: AUTO (what the forecast period needs), yyyy-MM, or NONE (as far back as allowed)' -Default 'AUTO'
+                $to = Read-ForecastText -Prompt 'Last month, yyyy-MM (blank for the current month)' -Default ''
+                $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, or MCA' -Valid @('AUTO', 'EA', 'MCA') -Default 'AUTO'
+                $parsedDays = 0
+                $source = [pscustomobject]@{
+                    id = New-ForecastSourceId -Seed $scope; kind = 'CostDetails'; label = Read-ForecastText -Prompt 'Label' -Default 'Cost Details'
+                    scope = ([string]$scope).Trim(); chunkDays = $(if ([int]::TryParse($days, [ref]$parsedDays)) { $parsedDays } else { $days })
+                    fromMonth = $(switch -Regex (([string]$from).Trim()) { '^(?i)auto$' { 'Auto' } '^(?i)none$' { '' } default { $_ } }); toMonth = ([string]$to).Trim()
+                    storageResourceId = ''; container = ''; prefix = ''; path = ''; agreement = $(if ($agreement -eq 'AUTO' -or -not $agreement) { 'Auto' } else { $agreement })
+                }
                 $problems = @(Test-ForecastSourceDefinition -Source $source)
                 if ($problems.Count) { foreach ($p in $problems) { Write-FinOpsConsole "  ! $($p.Message)" -ForegroundColor Yellow }; Wait-ForecastKey; continue }
                 $settings.sources = @($sources + $source)
@@ -74,8 +179,24 @@ function Edit-ForecastSources {
                 if (-not [int]::TryParse((Read-ForecastText -Prompt 'Source number'), [ref]$number) -or $number -lt 1 -or $number -gt $sources.Count) { continue }
                 $s = $sources[$number - 1]
                 $s.label = Read-ForecastText -Prompt 'Label' -Default $s.label
-                $s.prefix = (Read-ForecastText -Prompt 'Folder path' -Default $s.prefix).Trim('/')
-                $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, MCA, or FOCUS' -Valid @('AUTO', 'EA', 'MCA', 'FOCUS') -Default ([string]$s.agreement).ToUpperInvariant()
+                if ([string]$s.kind -eq 'CostDetails') {
+                    $days = Read-ForecastText -Prompt 'Days per report, 1 to 31' -Default ([string](Get-ForecastCostDetailsChunkDays -Source $s))
+                    $parsedDays = 0
+                    $values = [ordered]@{
+                        chunkDays = $(if ([int]::TryParse($days, [ref]$parsedDays)) { $parsedDays } else { $days })
+                        fromMonth = ([string](Read-ForecastText -Prompt 'First month: yyyy-MM, AUTO (what the forecast period needs), or NONE' -Default ([string]$s.fromMonth))).Trim()
+                        toMonth = ([string](Read-ForecastText -Prompt 'Last month, yyyy-MM, or NONE' -Default ([string]$s.toMonth))).Trim()
+                    }
+                    foreach ($name in @($values.Keys)) {
+                        $value = if ($values[$name] -match '^(?i)none$') { '' } elseif ($name -eq 'fromMonth' -and $values[$name] -eq 'Auto') { 'Auto' } else { $values[$name] }
+                        if ($s.PSObject.Properties[$name]) { $s.$name = $value } else { $s | Add-Member -NotePropertyName $name -NotePropertyValue $value }
+                    }
+                    $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, or MCA' -Valid @('AUTO', 'EA', 'MCA') -Default ([string]$s.agreement).ToUpperInvariant()
+                }
+                else {
+                    $s.prefix = (Read-ForecastText -Prompt 'Folder path' -Default $s.prefix).Trim('/')
+                    $agreement = Read-ForecastChoice -Prompt 'Schema: Auto, EA, MCA, or FOCUS' -Valid @('AUTO', 'EA', 'MCA', 'FOCUS') -Default ([string]$s.agreement).ToUpperInvariant()
+                }
                 $s.agreement = if ($agreement -eq 'AUTO' -or -not $agreement) { 'Auto' } else { $agreement }
                 Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings; Wait-ForecastKey
             }
@@ -105,38 +226,50 @@ function Edit-ForecastSources {
     }
 }
 
-function Add-ForecastDiscoveredSources {
-    param([Parameter(Mandatory)][string]$Root)
+function Select-ForecastDiscoveredSources {
+    # Finds actual-cost and FOCUS exports for the subscriptions, the
+    # management groups, and billing accounts above them, and returns the
+    # ones the user picks as sources. Read-only.
+    param([Parameter(Mandatory)][object[]]$Subscriptions)
     Write-FinOpsConsole '  Discovery reads export definitions and storage listings. It doesn''t create or change anything.' -ForegroundColor DarkGray
-    $subscriptions = @(Select-Subscription)
-    if ($subscriptions.Count -eq 0) { return }
     $tenantId = (Get-AzContext).Tenant.Id
     $found = [Collections.Generic.List[object]]::new()
-    foreach ($export in @(Find-CostExport -Subscriptions $subscriptions -IncludeManagementGroups -IncludeBillingAccounts -TenantId $tenantId -SkipRunHistory)) { $found.Add($export) }
+    foreach ($export in @(Find-CostExport -Subscriptions $Subscriptions -IncludeManagementGroups -IncludeBillingAccounts -TenantId $tenantId -SkipRunHistory)) { $found.Add($export) }
     $known = @{}
     foreach ($export in $found) { $known[("$($export.StorageResourceId)|$($export.Container)|$($export.RootFolder)|$($export.Name)").ToLowerInvariant()] = $true }
-    foreach ($export in @(Find-CostExportFromStorage -Subscriptions $subscriptions -KnownKeys $known)) { $found.Add($export) }
+    foreach ($export in @(Find-CostExportFromStorage -Subscriptions $Subscriptions -KnownKeys $known)) { $found.Add($export) }
     $usable = @($found | Where-Object { $_.StorageResourceId -and $_.Container -and $_.Type -notmatch 'Amortized' })
-    if ($usable.Count -eq 0) { Write-FinOpsConsole '  No actual-cost or FOCUS exports were found.' -ForegroundColor Yellow; Wait-ForecastKey; return }
+    if ($usable.Count -eq 0) { Write-FinOpsConsole '  No actual-cost or FOCUS exports were found.' -ForegroundColor Yellow; return , [object[]]@() }
     for ($i = 0; $i -lt $usable.Count; $i++) {
         $e = $usable[$i]
         Write-FinOpsConsole ('  {0,3}  {1,-28} {2,-12} {3}' -f ($i + 1), (ConvertTo-ForecastSafeText $e.Name 28), $e.Type, (ConvertTo-ForecastSafeText $e.ScopeLabel 60))
     }
     $answer = Read-ForecastText -Prompt 'Numbers to add, separated by commas (blank to cancel)'
-    if (-not $answer) { return }
-    $settings = Get-ForecastStoredSettings -Root $Root
-    $added = 0
-    foreach ($token in ($answer -split ',')) {
+    $sources = [Collections.Generic.List[object]]::new()
+    foreach ($token in (([string]$answer) -split ',')) {
         $number = 0
         if (-not [int]::TryParse($token.Trim(), [ref]$number) -or $number -lt 1 -or $number -gt $usable.Count) { continue }
         $e = $usable[$number - 1]
         $prefix = (@(([string]$e.RootFolder).Trim('/'), [string]$e.Name) | Where-Object { $_ }) -join '/'
         $source = [pscustomobject]@{ id = New-ForecastSourceId -Seed $prefix; kind = 'AzureStorage'; label = "$($e.Name) ($($e.ScopeLabel))"; storageResourceId = [string]$e.StorageResourceId; container = [string]$e.Container; prefix = $prefix; path = ''; agreement = 'Auto' }
         if (@(Test-ForecastSourceDefinition -Source $source).Count) { Write-FinOpsConsole "  Skipped $($e.Name): its storage location isn't valid." -ForegroundColor Yellow; continue }
-        $settings.sources = @(@($settings.sources) + $source)
-        $added++
+        $sources.Add($source)
     }
-    if ($added) { Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings }
+    return , $sources.ToArray()
+}
+
+function Add-ForecastDiscoveredSources {
+    param([Parameter(Mandatory)][string]$Root)
+    $subscriptions = @(Select-Subscription | Where-Object { $_ })
+    if ($subscriptions.Count -eq 0) { return }
+    # Assign first: @(...) around a call that returns , $array would nest it.
+    $chosen = Select-ForecastDiscoveredSources -Subscriptions $subscriptions
+    $chosen = @($chosen)
+    if ($chosen.Count) {
+        $settings = Get-ForecastStoredSettings -Root $Root
+        $settings.sources = @(@($settings.sources) + $chosen)
+        Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings
+    }
     Wait-ForecastKey
 }
 
@@ -164,6 +297,7 @@ function Edit-ForecastScope {
         'L' { $settings.scope.label = ConvertTo-ForecastSafeText (Read-ForecastText -Prompt 'Label shown on reports' -Default $settings.scope.label) 120 }
         default { return }
     }
+    Update-ForecastScopeExclusions -Settings $settings
     Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings
     Wait-ForecastKey
 }
@@ -185,12 +319,15 @@ function Edit-ForecastPeriod {
     $period = $settings.period
     $period.fiscalYearStartMonth = Read-ForecastInteger -Prompt 'Fiscal year start month' -Default $period.fiscalYearStartMonth -Minimum 1 -Maximum 12
     $period.fiscalYearOffset = Read-ForecastInteger -Prompt 'Fiscal year: 0 current, 1 next' -Default $period.fiscalYearOffset -Minimum 0 -Maximum 1
-    $period.lookbackMonths = Read-ForecastInteger -Prompt 'Lookback in complete months' -Default $period.lookbackMonths -Minimum 12 -Maximum 36
-    $period.graceDays = Read-ForecastInteger -Prompt 'Days after month end before a month counts as final' -Default $period.graceDays -Minimum 0 -Maximum 10
+    $previousLookback = [int]$period.lookbackMonths
+    $period.lookbackMonths = Read-ForecastInteger -Prompt "Lookback in complete months (under $($script:ForecastReadyMonths) is Preliminary)" -Default $period.lookbackMonths -Minimum $script:ForecastMinimumLookbackMonths -Maximum 36
+    $period.graceDays = Read-ForecastInteger -Prompt 'Days after month end before a month counts as final (4 = from the 5th)' -Default $period.graceDays -Minimum 0 -Maximum 10
     $period.staleAfterDays = Read-ForecastInteger -Prompt 'Days before data is labeled stale' -Default $period.staleAfterDays -Minimum 1 -Maximum 365
     $end = Read-ForecastText -Prompt 'Window end: Auto, or a month (yyyy-MM) to pin it' -Default $period.windowEnd
     $period.windowEnd = if ($end -match '^(?i)auto$') { 'Auto' } else { $end }
-    if ([int]$settings.method.minimumRetained -gt [int]$period.lookbackMonths - 1) { $settings.method.minimumRetained = [int]$period.lookbackMonths - 1 }
+    # A default threshold follows the lookback; a customized one is only clamped.
+    if ([int]$settings.method.minimumRetained -eq (Get-ForecastDefaultMinimumRetained -LookbackMonths $previousLookback)) { $settings.method.minimumRetained = Get-ForecastDefaultMinimumRetained -LookbackMonths ([int]$period.lookbackMonths) }
+    elseif ([int]$settings.method.minimumRetained -gt [int]$period.lookbackMonths - 1) { $settings.method.minimumRetained = [int]$period.lookbackMonths - 1 }
     Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings
     Wait-ForecastKey
 }
@@ -202,8 +339,9 @@ function Edit-ForecastAssumptions {
         Clear-ForecastScreen
         Write-ForecastHeading -Title 'Assumptions'
         $m = $settings.method
-        Write-FinOpsConsole "  Method: median growth; sensitivity P$($m.lowPercentile)-P$($m.highPercentile); flag at $($m.anomalyK) x scaled MAD (minimum $(Format-ForecastPercent (Read-ForecastDecimal $m.anomalyMinimumDeviation))); at least $($m.minimumRetained) retained; backtest horizon $($m.backtestHorizon)"
-        Write-FinOpsConsole "  Filters: Marketplace $(if ($settings.filters.includeMarketplace) { 'included' } else { 'excluded' }); tax $(if ($settings.filters.includeTax) { 'included' } else { 'excluded' }); credits never counted"
+        $range = if (Test-ForecastShortHistory -Settings $settings) { "lowest to highest while the lookback is under $($script:ForecastReadyMonths) months (P$($m.lowPercentile) to P$($m.highPercentile) after)" } else { "P$($m.lowPercentile) to P$($m.highPercentile)" }
+        Write-FinOpsConsole "  Method: median growth; sensitivity $range; flag at $($m.anomalyK) x scaled MAD (minimum $(Format-ForecastPercent (Read-ForecastDecimal $m.anomalyMinimumDeviation))); at least $($m.minimumRetained) retained; backtest horizon $($m.backtestHorizon); changes across an agreement change $(if ($m.reviewAgreementChange) { 'need a review' } else { 'aren''t reviewed' })"
+        Write-FinOpsConsole "  Filters: Marketplace $(if ($settings.filters.includeMarketplace) { 'included' } else { 'excluded' })$(if ($settings.filters.showMarketplace) { ', shown in its own report section' }); tax $(if ($settings.filters.includeTax) { 'included' } else { 'excluded' }); credits never counted"
         Write-FinOpsConsole "  Workloads: $($settings.workloads.mode)$(if ($settings.workloads.tagKey) { "; tag key '$($settings.workloads.tagKey)'" })$(if ($settings.workloads.mappingPath) { "; mapping $($settings.workloads.mappingPath)" })"
         Write-FinOpsConsole "  Scheduled items: $(@($settings.scheduledItems).Count)"
         Write-FinOpsConsole '  M Method   F Filters   W Workloads   S Scheduled items   B Back' -ForegroundColor DarkGray
@@ -217,10 +355,12 @@ function Edit-ForecastAssumptions {
                 if ($null -ne (Read-ForecastDecimal $minimum)) { $m.anomalyMinimumDeviation = Format-ForecastDecimal (Read-ForecastDecimal $minimum) }
                 $m.minimumRetained = Read-ForecastInteger -Prompt 'Minimum retained comparisons' -Default $m.minimumRetained -Minimum 1 -Maximum ([int]$settings.period.lookbackMonths - 1)
                 $m.backtestHorizon = Read-ForecastInteger -Prompt 'Backtest horizon in months' -Default $m.backtestHorizon -Minimum 1 -Maximum 12
+                $m.reviewAgreementChange = Read-ForecastYesNo -Prompt 'Ask for a review of each change between months on different agreements (EA and MCA)?' -Default ([bool]$m.reviewAgreementChange)
                 Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings; Wait-ForecastKey
             }
             'F' {
                 $settings.filters.includeMarketplace = Read-ForecastYesNo -Prompt 'Include Marketplace charges?' -Default ([bool]$settings.filters.includeMarketplace)
+                $settings.filters.showMarketplace = Read-ForecastYesNo -Prompt 'Show Marketplace charges in their own report section?' -Default ([bool]$settings.filters.showMarketplace)
                 $settings.filters.includeTax = Read-ForecastYesNo -Prompt 'Include tax lines (manual inputs only; exports carry no tax)?' -Default ([bool]$settings.filters.includeTax)
                 Save-ForecastSettingsWithFeedback -Root $Root -Settings $settings; Wait-ForecastKey
             }
@@ -300,7 +440,9 @@ function Edit-ForecastInputs {
         $inputs = Get-ForecastStoredInputs -Root $Root
         $session = Invoke-ForecastEvaluation -Root $Root -AsOf $(if ($Session) { $Session.AsOf } else { [datetime]::UtcNow })
         $windowMonths = @($session.Model.Window.Rows.Month)
-        $months = @(@($windowMonths) + @($inputs.months.month) | Where-Object { $_ } | Sort-Object -Unique)
+        # Fiscal-year months before the window count as actuals too, so they're listed for entry.
+        $fiscalMonths = @($session.Model.FiscalYear.Months | Where-Object { $_ -and [string]::CompareOrdinal([string]$_, [string]$session.Model.Window.Last) -le 0 })
+        $months = @(@($windowMonths) + $fiscalMonths + @($inputs.months.month) | Where-Object { $_ } | Sort-Object -Unique)
         Clear-ForecastScreen
         Write-ForecastHeading -Title "Inputs (currency $(if ($inputs.currency) { $inputs.currency } else { 'not set' }); scope '$(ConvertTo-ForecastSafeText $inputs.scopeLabel 60)')"
         Write-FinOpsConsole ('  {0,-8} {1,-13} {2,16} {3,14} {4,16} {5,-9}  {6}' -f 'Month', 'Status', 'Azure usage', 'Other charges', 'Total', 'Review', 'Evidence') -ForegroundColor White
@@ -311,7 +453,7 @@ function Edit-ForecastInputs {
             $review = @($session.Dataset.Reviews | Where-Object Subject -EQ $month)[0]
             $other = if ($row) { [decimal]$row.Purchase + [decimal]$row.Adjustment + [decimal]$row.Other } else { 0d }
             $color = switch ($status) { 'Missing' { 'Red' } 'VerifiedZero' { 'Cyan' } default { 'Gray' } }
-            $inWindow = if ($month -in $windowMonths) { '' } else { ' (outside window)' }
+            $inWindow = if ($month -in $windowMonths) { '' } elseif ($month -in $fiscalMonths) { ' (fiscal year, before the window)' } else { ' (outside window)' }
             Write-FinOpsConsole ('  {0,-8} {1,-13} {2,16} {3,14} {4,16} {5,-9}  {6}{7}' -f $month, $status, $(if ($row -and $null -ne $row.RunRate) { Format-ForecastAmount $row.RunRate } else { '-' }), (Format-ForecastAmount $other), $(if ($row -and $null -ne $row.Headline) { Format-ForecastAmount $row.Headline } else { '-' }), $(if ($review) { $review.Decision } else { '-' }), (ConvertTo-ForecastSafeText $record.evidence 40), $inWindow) -ForegroundColor $color
         }
         Write-FinOpsConsole "  Other billed charges: $(@($inputs.otherCharges).Count). Missing months are never treated as zero; type 'zero' for a verified zero." -ForegroundColor DarkGray

@@ -23,7 +23,7 @@ replace their ingestion pipelines or monitor the environment between runs.
 
 ## Startup screen
 
-![FinOps Explorer TUI startup and tenant picker with fictional account and tenant details.](docs/images/finops-multitool-startup.png)
+![FinOps Explorer TUI startup with the banner and a prompt to choose between scans and the pre-credit forecast.](docs/images/finops-multitool-startup.png)
 
 ## Workflow
 
@@ -81,6 +81,14 @@ Running the public file with `-File` alone only defines the function; it does
 select subscriptions, data sources, and scans. Numbered prompts are used when
 the terminal cannot support arrow-key menus. `Start-FinOpsMultitool` remains
 available as a backward-compatible wrapper for existing scripts.
+
+Interactive startup lists the tenants you can reach by name, never by ID, so you
+can choose the customer to scan. Type part of a name to narrow the list, then
+press Enter. Only the chosen tenant's subscriptions are listed. If a saved
+sign-in has expired, or the tenant asks for MFA again, the TUI says so and signs
+you in to that tenant again before it reads anything. Numbered prompts and
+`-Accessible` take a number or part of a name instead, and unattended runs stay
+in the signed-in tenant.
 
 For an unattended run, authenticate separately with the intended Azure identity
 first, then use `-NonInteractive` and explicit scope/scan parameters. Do not
@@ -394,26 +402,104 @@ for the upstream architecture and setup requirements.
 
 ## Forecast pre-credit cost and workload growth
 
-This standalone copy adds a fiscal-year forecast built from your own Cost
-Management exports. It shows actuals to date plus the rest of the year as a
-central estimate with a sensitivity range, and which workloads drove the
-growth. Amounts are pre-credit (cost before Azure credits and prepayment), with
-Marketplace and tax excluded by default. It reads EA, MCA, and FOCUS
-actual-cost exports, joins EA and MCA history across a migration, and falls
-back to manual monthly inputs when no exports exist.
+This standalone copy adds a fiscal-year forecast of Azure spend. It shows
+actuals to date plus the rest of the year as a central estimate with a
+sensitivity range, and which workloads drove the growth. Amounts are pre-credit
+(cost before Azure credits and prepayment), with Marketplace and tax excluded by
+default. It reads EA, MCA, and FOCUS actual cost, and joins EA and MCA history
+across a migration.
+
+The forecast reads Azure data only. With a live source, the one request that
+isn't a plain read asks Cost Management to generate a temporary report. It never
+creates exports, changes permissions, or provisions anything.
 
 ```powershell
 . .\Public\Start-FinOpsForecast.ps1
-Start-FinOpsForecast -WorkspaceName contoso-fy27
+Start-FinOpsForecast
 ```
 
 You can also choose **Pre-credit forecast and workload growth** at the first
 prompt of `Start-FinOpsExplorer`. Scripted Explorer runs (`-NonInteractive`,
 `-Scans`, or `-DataSource`) skip that prompt.
 
-The forecast reads Azure data only. It needs 12 or more complete months, asks
-for a decision whenever the data is ambiguous, and won't save a forecast until
-every required check passes. See the [usage guide](docs/forecast.md) and the
+### Guided setup
+
+In a new or empty workspace, guided setup walks you through four steps:
+
+1. **Sign in and choose the tenant by name.** If your saved sign-in has
+   expired, you're asked to sign in again. Unless you pass `-WorkspaceName`, the
+   forecast then opens a private workspace named for that tenant, so one
+   customer's saved forecasts and decisions never mix with another's.
+2. **Pick the history.** Choose 3 to 36 months (live reads reach back 12) and
+   the month your fiscal year starts.
+3. **See how it works.** A screen explains how the forecast is built and ranks
+   the ways to read the history by estimated time, fastest first. Press **H** on
+   the review page to see it again.
+4. **Choose the source.** Setup saves your choices and offers to refresh right
+   away. For live reads, it says how many reports the first refresh needs and
+   roughly how long they'll take.
+
+The ways to read the history, fastest first:
+
+1. **Exports.** Cost Management actual-cost or FOCUS CSV exports in Azure
+   Storage, or a local copy of the export container. Usually minutes, once
+   exports already cover the months.
+2. **Live, at the billing account.** The forecast asks Cost Management to
+   generate ActualCost reports (the Cost Details API) for the one EA or MCA
+   billing account that owns all your subscriptions, so one set of weekly
+   reports covers every subscription. It needs an EA or MCA billing reader role
+   there, and it's offered for more than three subscriptions.
+3. **Live, one subscription at a time.** The same reports, one subscription per
+   report, and the slowest. On one live tenant, 124 subscriptions over 5 months
+   (620 reports) took 9.7 hours, about a minute a report. Leave the window open
+   while it runs. Cost Details reads only EA and MCA subscriptions; after a
+   refresh, **U** in 1 Source removes the pay-as-you-go and Visual Studio
+   subscriptions it turned down.
+
+With no access to any of these, type in monthly totals from invoices. Above 3
+months of history, the screen recommends exports if they already cover the
+months, then the fastest live read your sign-in can use. See [how long reading
+the history takes](docs/forecast.md#how-long-reading-the-history-takes) for the
+estimates and ways to speed up a first read.
+
+### Ready and Preliminary forecasts
+
+With 12 or more complete months, the forecast can be **Ready** and saved as a
+vintage (a frozen copy). With 3 to 11 months it's **Preliminary**: reported,
+with the range running from the lowest to the highest month-to-month change,
+but never saved.
+
+By default, a month counts as final from 00:00 UTC on the 5th of the next month,
+when a daily cost export writes its last copy. Until then, later refreshes read
+it again. If Cost Details can no longer return a month that was read early, the
+forecast keeps that copy as provisional and says so.
+
+The forecast asks for a decision whenever the data is ambiguous, records your
+answer with a reason, and asks again if the data changes. Press **C** in
+**5 Exceptions** to review any month-to-month change yourself, for example
+after new reservations. That matters most with 3 months of history, where
+nothing is flagged on its own. A forecast is saved only when every required
+check passes.
+
+It also helps with gaps and commitments:
+
+- A recurring purchase without a scheduled item gets a proposed one. Press
+  **A** on its review to add it.
+- A change between months on different agreements, such as EA and MCA, needs
+  a review, because their prices can differ.
+- A month whose charges start partway through is flagged, since that's how a
+  new agreement looks.
+- The report lists what each source's reads returned, and every subscription
+  left out of the scope with its reason.
+- Marketplace charges get their own section for tracking commitments. They're
+  still left out of the forecast by default.
+
+The HTML report looks like the scan report. It opens on an overview written for
+executives and finance: the status and what needs attention, a chart of the
+fiscal year by month, how the central estimate adds up, what drives it, and
+quarter totals. Each section has its own tab with the full tables.
+
+See the [usage guide](docs/forecast.md) and the
 [design and integration plan](docs/forecast-design.md).
 
 ## Reports and privacy
@@ -422,8 +508,10 @@ Scans read Azure data and write **local reports**. By default, each run creates
 a private timestamped directory beneath `FinOpsToolkit\Explorer\Reports` in
 the current user's local application data directory. It contains CSV results,
 an HTML report, and a text summary. The forecast also keeps a private
-workspace per name beneath `FinOpsToolkit\Explorer\Forecast` with its
-settings, review decisions, cached export history, and saved forecasts.
+workspace beneath `FinOpsToolkit\Explorer\Forecast`, named for the tenant unless
+you pass a name, with its settings, review decisions, cached history, and saved
+forecasts. The temporary download links for live Cost Management reports are
+never written to the console, the workspace, or any report.
 
 Reports can include tenant/subscription identifiers, resource names, tags,
 billing information, and costs. Do not upload reports, credentials, access
@@ -472,9 +560,12 @@ The forecast has its own Pester 6 suite in `Tests/`, using synthetic data only:
 .\scripts\Invoke-ForecastTests.ps1 -ToolkitRoot '<path-to-finops-toolkit-repository>'
 ```
 
-It covers export selection and verification, EA-to-MCA joins, the forecast
-method, workloads, manual inputs, the workspace store, the console screens,
-end-to-end runs, and read-only safety. It doesn't test live Azure access.
+It covers export selection and verification, EA-to-MCA joins, the Cost Details
+source against a synthetic Cost Management API, the forecast method, review
+decisions, workloads, manual inputs, the workspace store, guided setup and its
+time estimates, the console screens, end-to-end runs, and read-only safety. It
+also covers Explorer's tenant picker and sign-in renewal against stubbed Az
+commands. It doesn't test live Azure access.
 
 For the original public packaging, all 79 PowerShell files passed syntax parsing,
 the KPI catalog parsed as JSON, and the root module and public entry point loaded

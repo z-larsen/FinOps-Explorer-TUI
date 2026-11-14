@@ -115,6 +115,7 @@ function New-SyntheticExportRun {
     # Explicit ranges model runs that start mid-month or stop early.
     if ($PSBoundParameters.ContainsKey('RangeStart')) { $start = $RangeStart.Date }
     if ($PSBoundParameters.ContainsKey('RangeEnd')) { $last = $RangeEnd.Date }
+    # A daily export writes its last copy of a closed month on day 5.
     if (-not $PSBoundParameters.ContainsKey('Submitted')) { $Submitted = $last.AddDays(5) }
     $range = '{0}-{1}' -f $start.ToString('yyyyMMdd'), $last.ToString('yyyyMMdd')
     $relativeFolder = "exports/$ExportName/$range/$RunId"

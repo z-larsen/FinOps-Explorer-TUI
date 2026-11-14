@@ -99,35 +99,44 @@ function Show-ForecastSetupReview {
         if ($session) {
             $readiness = $session.Readiness
             $failing = @($readiness.Checks | Where-Object Status -EQ 'Fail').Count
-            $statusText = if ($readiness.Ready) { 'READY' } else { "NOT READY ($failing check$(if ($failing -ne 1) { 's' }) failing)" }
-            Write-FinOpsConsole "  Status: $statusText$(if ($readiness.Labels.Count) { "  [$($readiness.Labels -join ', ')]" })" -ForegroundColor $(if ($readiness.Ready) { 'Green' } else { 'Red' })
+            $statusText = if ($readiness.Ready) { 'READY' }
+            elseif ($readiness.Status -eq 'Preliminary') { "PRELIMINARY ($($session.Settings.period.lookbackMonths) months of history; $($script:ForecastReadyMonths) are needed for Ready)" }
+            else { "NOT READY ($failing check$(if ($failing -ne 1) { 's' }) failing)" }
+            $statusColor = if ($readiness.Ready) { 'Green' } elseif ($readiness.Status -eq 'Preliminary') { 'Yellow' } else { 'Red' }
+            $statusLabels = Get-ForecastDisplayLabels -Readiness $readiness
+            Write-FinOpsConsole "  Status: $statusText$(if ($statusLabels.Count) { "  [$($statusLabels -join ', ')]" })" -ForegroundColor $statusColor
             Write-FinOpsConsole ''
             $settings = $session.Settings
             $dataset = $session.Dataset
             $model = $session.Model
             $sourceSummary = if ($settings.dataMode -eq 'Manual') { "Manual inputs: $(@($dataset.Months | Where-Object Status -NE 'Missing').Count) month(s) entered" }
-            else { "$(@($settings.sources).Count) export source(s); $(@($dataset.Runs).Count) run-month(s) selected; $(@($dataset.Runs | Where-Object { -not $_.Final }).Count) not final" }
+            else { "$(Get-ForecastSourceCountText -Sources @($settings.sources)); $(@($dataset.Runs).Count) run-month(s) selected; $(@($dataset.Runs | Where-Object { -not $_.Final }).Count) not final" }
             Write-ForecastSectionLine '1' 'Source' $sourceSummary (Get-ForecastCheckStatus $readiness @('SOURCE', 'CURRENCY', 'BOUNDARY'))
             Write-ForecastSectionLine '2' 'Scope' $session.ScopeLabel (Get-ForecastCheckStatus $readiness @('SETTINGS', 'POPULATION'))
-            Write-ForecastSectionLine '3' 'Period' "$($model.FiscalYear.Label) ($($model.FiscalYear.FirstMonth) to $($model.FiscalYear.LastMonth)); lookback $($model.Window.First) to $($model.Window.Last)" (Get-ForecastCheckStatus $readiness @('MONTHS', 'COMPARISONS', 'RETAINED'))
-            Write-ForecastSectionLine '4' 'Assumptions' "Median growth, P$($settings.method.lowPercentile)-P$($settings.method.highPercentile) range; $(@($settings.scheduledItems).Count) scheduled item(s); workloads by $($settings.workloads.mode)$(if ($settings.workloads.mode -eq 'Tag') { " '$($settings.workloads.tagKey)'" })" (Get-ForecastCheckStatus $readiness @('KEYS', 'BASELINE'))
+            Write-ForecastSectionLine '3' 'Period' "$($model.FiscalYear.Label) ($($model.FiscalYear.FirstMonth) to $($model.FiscalYear.LastMonth)); lookback $($model.Window.First) to $($model.Window.Last)" (Get-ForecastCheckStatus $readiness @('MONTHS', 'HISTORY', 'ACTUALS', 'COMPARISONS', 'RETAINED'))
+            Write-ForecastSectionLine '4' 'Assumptions' "Median growth, $(Get-ForecastRangeLabel -Settings $settings) range; $(@($settings.scheduledItems).Count) scheduled item(s); workloads by $($settings.workloads.mode)$(if ($settings.workloads.mode -eq 'Tag') { " '$($settings.workloads.tagKey)'" })" (Get-ForecastCheckStatus $readiness @('KEYS', 'BASELINE'))
             $pendingRequired = @($readiness.Reviews | Where-Object { $_.Required -and $_.Decision -eq 'Pending' }).Count
             $pendingOptional = @($readiness.Reviews | Where-Object { -not $_.Required -and $_.Decision -eq 'Pending' }).Count
             Write-ForecastSectionLine '5' 'Exceptions' "$pendingRequired required and $pendingOptional optional review(s) pending of $(@($readiness.Reviews).Count)" (Get-ForecastCheckStatus $readiness @('EXCEPTIONS'))
             $reconcileFails = @($readiness.Checks | Where-Object { $_.Id -eq 'RECONCILE' -and $_.Status -eq 'Fail' }).Count
             Write-ForecastSectionLine '6' 'Reconciliation' $(if ($reconcileFails) { 'Some months don''t reconcile' } else { "$(@($dataset.Reconciliation).Count) run-month(s) reconcile to raw totals" }) (Get-ForecastCheckStatus $readiness @('RECONCILE'))
-            $refreshSummary = if ($settings.dataMode -eq 'Manual') { 'Not used for manual inputs' } elseif ($session.RefreshState) { "Last attempt $($session.RefreshState.LastAttemptUtc) ($($session.RefreshState.LastAttemptResult))" } else { 'Never refreshed' }
+            $refreshSummary = if ($settings.dataMode -eq 'Manual') { 'Not used for manual inputs' }
+            elseif ($session.RefreshState) {
+                $keptCount = [int]$session.RefreshState.LastAttemptKeptEarlier
+                "Last attempt $($session.RefreshState.LastAttemptUtc) ($($session.RefreshState.LastAttemptResult)$(if ($keptCount) { "; kept an earlier read for $(Get-ForecastCountText -Count $keptCount -Singular 'month' -Plural 'months')" }))"
+            }
+            else { 'Never refreshed' }
             Write-ForecastSectionLine '7' 'Refresh' $refreshSummary (Get-ForecastCheckStatus $readiness @('FRESHNESS'))
             Write-FinOpsConsole ''
             $projection = $model.Projection
             if ($null -ne $model.Growth.Central -and $null -ne $model.Baseline.Value) {
-                Write-FinOpsConsole "  $($projection.FiscalYear.Label) pre-credit: central $(Format-ForecastAmount $projection.TotalCentral $dataset.Currency); range $(Format-ForecastAmount $projection.TotalLow) to $(Format-ForecastAmount $projection.TotalHigh)$(if (-not $readiness.Ready) { ' (preview; not Ready)' })" -ForegroundColor White
+                Write-FinOpsConsole "  $($projection.FiscalYear.Label) pre-credit: central $(Format-ForecastAmount $projection.TotalCentral $dataset.Currency); range $(Format-ForecastAmount $projection.TotalLow) to $(Format-ForecastAmount $projection.TotalHigh)$(if ($readiness.Status -eq 'Preliminary') { ' (preliminary)' } elseif (-not $readiness.Ready) { ' (preview; not Ready)' })" -ForegroundColor White
             }
         }
         Write-FinOpsConsole ''
         $inputsAction = if ($session -and $session.Settings.dataMode -eq 'Manual') { '  I Inputs' } else { '' }
-        Write-FinOpsConsole "  1-7 Open a section$inputsAction   W Workloads   R Refresh   F Forecast and save   P Preview report   Q Quit" -ForegroundColor DarkGray
-        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid @('1', '2', '3', '4', '5', '6', '7', 'I', 'W', 'R', 'F', 'P', 'Q')
+        Write-FinOpsConsole "  1-7 Open a section$inputsAction   W Workloads   R Refresh   F Forecast and save   P Preview report   G Guided setup   H How it works   Q Quit" -ForegroundColor DarkGray
+        $choice = Read-ForecastChoice -Prompt 'Choose' -Valid @('1', '2', '3', '4', '5', '6', '7', 'I', 'W', 'R', 'F', 'P', 'G', 'H', 'Q')
         if ($choice -eq '') { $emptyAnswers++; if ($emptyAnswers -ge 2) { return }; continue }
         $emptyAnswers = 0
         try {
@@ -144,6 +153,8 @@ function Show-ForecastSetupReview {
                 'R' { Invoke-ForecastConsoleRefresh -Root $Root }
                 'F' { if ($session) { Invoke-ForecastConsolePublish -Session $session -OutputPath $OutputPath -SaveVintage } }
                 'P' { if ($session) { Invoke-ForecastConsolePublish -Session $session -OutputPath $OutputPath } }
+                'G' { $null = Start-ForecastGuidedSetup -Root $Root -AsOf $AsOf }
+                'H' { Show-ForecastHowItWorks -Root $Root -AsOf $AsOf }
                 'Q' { return }
             }
         }
@@ -152,6 +163,26 @@ function Show-ForecastSetupReview {
             Wait-ForecastKey
         }
     }
+}
+
+function Select-ForecastComparisonReview {
+    # Lists every month-to-month change, so one the forecast didn't flag can
+    # be reviewed by hand. Returns its review, or $null to cancel.
+    param([Parameter(Mandatory)]$Session)
+    $changes = @($Session.Model.Comparisons.Items | Where-Object Status -EQ 'Defined')
+    Write-ForecastHeading -Title 'Month-to-month changes'
+    Write-FinOpsConsole ('  {0,3}  {1,-18} {2,9}  {3,-9}  {4}' -f '#', 'Months', 'Change', 'In growth', 'Decision') -ForegroundColor White
+    for ($i = 0; $i -lt $changes.Count; $i++) {
+        $change = $changes[$i]
+        $decision = if ($change.Review) { [string]$change.Review.Decision } else { '' }
+        Write-FinOpsConsole ('  {0,3}  {1,-18} {2,9}  {3,-9}  {4}' -f ($i + 1), "$($change.FromMonth) to $($change.ToMonth)", (Format-ForecastPercent $change.Change), $(if ($change.Retained) { 'yes' } else { 'no' }), $decision) -ForegroundColor $(if ($change.Flagged) { 'Yellow' } else { 'Gray' })
+    }
+    $answer = Read-ForecastText -Prompt 'Number of the change to review (blank to cancel)'
+    $number = 0
+    if (-not [int]::TryParse($answer, [ref]$number) -or $number -lt 1 -or $number -gt $changes.Count) { return $null }
+    $change = $changes[$number - 1]
+    if ($change.Review) { return $change.Review }
+    return New-ForecastComparisonReview -Comparison $change -ScopeKey $Session.Model.ScopeKey -Median $Session.Model.Comparisons.Median -Threshold $Session.Model.Comparisons.Threshold
 }
 
 function Show-ForecastExceptions {
@@ -165,9 +196,12 @@ function Show-ForecastExceptions {
             $c = $left.CompareTo($right)
             if ($c) { $c } else { [string]::CompareOrdinal([string]$a.Key, [string]$b.Key) }
         }
+        # A list filtered to one category, such as approving manual months, stays on it.
+        $changes = if ($Category) { 0 } else { @($Session.Model.Comparisons.Items | Where-Object Status -EQ 'Defined').Count }
         Clear-ForecastScreen
         Write-ForecastHeading -Title "Exceptions ($($ordered.Count))"
-        if ($ordered.Count -eq 0) { Write-FinOpsConsole '  Nothing to review.' -ForegroundColor Green; Wait-ForecastKey; return }
+        if ($ordered.Count -eq 0 -and $changes -eq 0) { Write-FinOpsConsole '  Nothing to review.' -ForegroundColor Green; Wait-ForecastKey; return }
+        if ($ordered.Count -eq 0) { Write-FinOpsConsole '  Nothing needs a decision.' -ForegroundColor Green }
         for ($i = 0; $i -lt $ordered.Count; $i++) {
             $item = $ordered[$i]
             $flag = if ($item.Decision -eq 'Pending') { if ($item.Required) { 'REQUIRED' } else { 'optional' } } else { $item.Decision }
@@ -175,20 +209,34 @@ function Show-ForecastExceptions {
             Write-FinOpsConsole ('  {0,3}  {1,-17} {2,-12} {3}' -f ($i + 1), $item.Category, $flag, (ConvertTo-ForecastSafeText $item.Title 80)) -ForegroundColor $color
         }
         Write-FinOpsConsole ''
-        $answer = Read-ForecastText -Prompt 'Number to review, or B to go back'
+        $answer = Read-ForecastText -Prompt $(if ($changes) { 'Number to review, C to review any month-to-month change, or B to go back' } else { 'Number to review, or B to go back' })
         if ($answer -eq '' -or $answer -match '^(?i)b$') { return }
-        $number = 0
-        if (-not [int]::TryParse($answer, [ref]$number) -or $number -lt 1 -or $number -gt $ordered.Count) { continue }
-        $item = $ordered[$number - 1]
+        if ($changes -and $answer -match '^(?i)c$') {
+            $item = Select-ForecastComparisonReview -Session $Session
+            if (-not $item) { continue }
+        }
+        else {
+            $number = 0
+            if (-not [int]::TryParse($answer, [ref]$number) -or $number -lt 1 -or $number -gt $ordered.Count) { continue }
+            $item = $ordered[$number - 1]
+        }
         Write-ForecastHeading -Title (ConvertTo-ForecastSafeText $item.Title 120)
         Write-FinOpsConsole "  $(ConvertTo-ForecastSafeText $item.Detail 1200)" -ForegroundColor Gray
-        if ($item.Stale) { Write-FinOpsConsole '  The data changed since the last decision, so it needs a new review.' -ForegroundColor Yellow }
+        if ($item.Stale) { Write-FinOpsConsole '  The data, or a decision it depends on, changed since the last decision, so it needs a new review.' -ForegroundColor Yellow }
         Write-FinOpsConsole "  Current decision: $($item.Decision)$(if ($item.Note) { " - $($item.Note)" })" -ForegroundColor DarkGray
         for ($o = 0; $o -lt @($item.Options).Count; $o++) {
             $suggested = if ($item.Options[$o] -eq $item.Suggested) { '  (suggested)' } else { '' }
             Write-FinOpsConsole ('    {0}  {1}{2}' -f ($o + 1), $item.Options[$o], $suggested)
         }
-        $pick = Read-ForecastText -Prompt 'Option number (blank to cancel)'
+        $proposal = if ($item.PSObject.Properties.Name -contains 'Proposal') { $item.Proposal } else { $null }
+        if ($proposal) { Write-FinOpsConsole "    A  Add the proposed scheduled item: $(Format-ForecastAmount (Read-ForecastDecimal $proposal.amount)) a month from $($proposal.startMonth)" -ForegroundColor Cyan }
+        $pick = Read-ForecastText -Prompt $(if ($proposal) { 'Option number, A to add the proposed item, or blank to cancel' } else { 'Option number (blank to cancel)' })
+        if ($proposal -and $pick -match '^(?i)a$') {
+            $null = Add-ForecastProposedItem -Root $Root -Proposal $proposal
+            Wait-ForecastKey
+            $Session = Invoke-ForecastEvaluation -Root $Root -AsOf $Session.AsOf
+            continue
+        }
         $optionNumber = 0
         if (-not [int]::TryParse($pick, [ref]$optionNumber) -or $optionNumber -lt 1 -or $optionNumber -gt @($item.Options).Count) { continue }
         $decision = $item.Options[$optionNumber - 1]
@@ -226,13 +274,22 @@ function Invoke-ForecastConsoleRefresh {
     param([Parameter(Mandatory)][string]$Root)
     $settings = Get-ForecastStoredSettings -Root $Root
     if ($settings.dataMode -ne 'Exports') { Write-FinOpsConsole '  Manual inputs don''t need a refresh.' -ForegroundColor DarkGray; Wait-ForecastKey; return }
-    if (@($settings.sources | Where-Object kind -EQ 'AzureStorage').Count -and -not (Get-AzContext -ErrorAction SilentlyContinue)) {
-        Write-FinOpsConsole '  Signing in to read Azure Storage sources...' -ForegroundColor Yellow
+    if (@($settings.sources | Where-Object kind -In 'AzureStorage', 'CostDetails').Count -and -not (Get-AzContext -ErrorAction SilentlyContinue)) {
+        Write-FinOpsConsole '  Signing in to read Azure sources...' -ForegroundColor Yellow
         $null = Select-Subscription
     }
     Write-FinOpsConsole '  Refreshing export history...' -ForegroundColor Cyan
     $result = Update-ForecastExportCache -Root $Root -Settings $settings
-    if ($result.Succeeded) { Write-FinOpsConsole "  Refresh succeeded: $($result.RunsRead) run(s) read, $($result.RunsReused) reused from the cache." -ForegroundColor Green }
+    if ($result.Succeeded) {
+        Write-FinOpsConsole "  Refresh succeeded: $($result.RunsRead) run(s) read, $($result.RunsReused) reused from the cache." -ForegroundColor Green
+        if ($result.RunsIncomplete) { Write-FinOpsConsole "  $($result.RunsIncomplete) run(s) couldn't be read completely and aren't used. Data checks list the reasons; refresh again to retry them." -ForegroundColor Yellow }
+        $kept = @($result.KeptEarlier | Where-Object { $_ })
+        if ($kept.Count) {
+            $listed = @($kept | Select-Object -First 5 | ForEach-Object { "$($_.Source) $($_.Month)" })
+            $more = if ($kept.Count -gt 5) { ", and $($kept.Count - 5) more" } else { '' }
+            Write-FinOpsConsole "  $(Get-ForecastCountText -Count $kept.Count -Singular 'month' -Plural 'months') couldn't be read again, so the earlier reads are still used: $($listed -join ', ')$more. The warnings above give the reasons. Refresh again to retry them." -ForegroundColor Yellow
+        }
+    }
     else { Write-FinOpsConsole "  Refresh failed; the previous data is still in use. $($result.Error)" -ForegroundColor Red }
     Wait-ForecastKey
 }
@@ -246,8 +303,10 @@ function Show-ForecastRefresh {
     else {
         Write-FinOpsConsole "  Last successful refresh: $(if ($state.LastSuccessUtc) { $state.LastSuccessUtc } else { 'none' })"
         foreach ($entry in @($state.Log | Select-Object -Last 10)) {
-            $color = if ($entry.Result -eq 'Succeeded') { 'Green' } else { 'Red' }
-            Write-FinOpsConsole "  $($entry.AttemptUtc)  $($entry.Result)  read $($entry.RunsRead), reused $($entry.RunsReused), $($entry.DurationSeconds)s  $(ConvertTo-ForecastSafeText $entry.Error 160)" -ForegroundColor $color
+            $keptCount = if ($entry.PSObject.Properties['RunsKeptEarlier']) { [int]$entry.RunsKeptEarlier } else { 0 }
+            $color = if ($entry.Result -ne 'Succeeded') { 'Red' } elseif ($keptCount) { 'Yellow' } else { 'Green' }
+            $kept = if ($keptCount) { "  kept an earlier read for $(Get-ForecastCountText -Count $keptCount -Singular 'month' -Plural 'months')" } else { '' }
+            Write-FinOpsConsole "  $($entry.AttemptUtc)  $($entry.Result)  read $($entry.RunsRead), reused $($entry.RunsReused), $($entry.DurationSeconds)s$kept  $(ConvertTo-ForecastSafeText $entry.Error 160)" -ForegroundColor $color
         }
     }
     if (Read-ForecastYesNo -Prompt 'Refresh now?') { Invoke-ForecastConsoleRefresh -Root $Root }
@@ -278,6 +337,8 @@ function Show-ForecastWorkloads {
             Write-ForecastHeading -Title (ConvertTo-ForecastSafeText $w.WorkloadName 100)
             Write-FinOpsConsole "  ID: $($w.WorkloadId)  Source: $($w.Source)  Flags: $($w.Flags)"
             Write-FinOpsConsole "  Run rate $($w.FirstMonth): $(Format-ForecastAmount $w.FirstRunRate $currency); $($w.LastMonth): $(Format-ForecastAmount $w.LastRunRate $currency)"
+            if ([decimal]$w.PurchasesFirst -ne 0 -or [decimal]$w.PurchasesLast -ne 0) { Write-FinOpsConsole "  Purchases this subscription pays for, $($w.FirstMonth): $(Format-ForecastAmount $w.PurchasesFirst $currency); $($w.LastMonth): $(Format-ForecastAmount $w.PurchasesLast $currency); net change with purchases $(Format-ForecastAmount $w.NetChange $currency)" }
+            if ($null -ne $w.MonthToDatePace) { Write-FinOpsConsole "  $($Session.Workloads.PaceMonth) so far: $(Format-ForecastAmount $w.MonthToDate $currency) in $($Session.Workloads.PaceDays) day(s), a pace of $(Format-ForecastAmount $w.MonthToDatePace $currency) for 30 days" }
             Write-FinOpsConsole "  Lookback spend $(Format-ForecastAmount $w.LookbackSpend $currency); latest month $(Format-ForecastAmount $w.LatestMonthSpend $currency)"
             if ($w.Notes) { Write-FinOpsConsole "  $(ConvertTo-ForecastSafeText $w.Notes 600)" -ForegroundColor Yellow }
             for ($m = 0; $m -lt $Session.Workloads.Months.Count; $m++) { Write-FinOpsConsole ('    {0}  {1,16}' -f $Session.Workloads.Months[$m], (Format-ForecastAmount $w.MonthlyRunRate[$m])) -ForegroundColor DarkGray }
@@ -300,6 +361,12 @@ function Show-ForecastWorkloads {
 function Invoke-ForecastConsolePublish {
     param([Parameter(Mandatory)]$Session, [string]$OutputPath, [switch]$SaveVintage)
     if ($SaveVintage -and -not $Session.Readiness.Ready) {
+        if ($Session.Readiness.Status -eq 'Preliminary') {
+            Write-ForecastHeading -Title 'A Preliminary forecast isn''t saved'
+            Write-FinOpsConsole "  It uses $($Session.Settings.period.lookbackMonths) months of history; a vintage needs $($script:ForecastReadyMonths). Use P to write a preview report labeled Preliminary." -ForegroundColor Yellow
+            Wait-ForecastKey
+            return
+        }
         Write-ForecastHeading -Title 'The forecast isn''t Ready'
         foreach ($check in @($Session.Readiness.Checks | Where-Object Status -EQ 'Fail')) { Write-FinOpsConsole "  [FAIL] $($check.Name): $(ConvertTo-ForecastSafeText $check.Detail 300)" -ForegroundColor Red }
         Write-FinOpsConsole '  Use P to write a preview report labeled NotReady.' -ForegroundColor DarkGray

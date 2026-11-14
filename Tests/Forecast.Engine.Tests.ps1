@@ -6,7 +6,7 @@
 param()
 BeforeAll {
     . (Join-Path $PSScriptRoot 'Forecast.TestHelpers.ps1')
-    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-05T12:00:00', [DateTimeKind]::Utc)
+    $script:AsOf = [datetime]::SpecifyKind([datetime]'2026-11-07T12:00:00', [DateTimeKind]::Utc)
     $script:Window = Get-TestMonthKeys -Last '2026-10'
 
     function New-RateSeries {
@@ -45,6 +45,36 @@ Describe 'Forecast engine' {
             @($model.Comparisons.Items | Where-Object Status -EQ 'Defined').Count | Should -Be 11
         }
 
+        It 'Asks for a review of each change between months on different agreements, and counts it until decided' {
+            $rates = [decimal[]](1000, 1020, 1040, 1061, 1082, 1104, 1126, 1149, 1172, 1195, 1219, 1243)
+            $dataset = New-TestDataset -Values (New-RateSeries $rates)
+            # EA until June, both in the month of the move, then MCA.
+            foreach ($row in $dataset.Months) {
+                $agreements = if ([string]::CompareOrdinal($row.Month, '2026-07') -lt 0) { @('EA') } elseif ($row.Month -eq '2026-07') { @('EA', 'MCA') } else { @('MCA') }
+                $row | Add-Member -NotePropertyName Agreements -NotePropertyValue $agreements
+            }
+            $settings = New-TestSettings
+            $model = Invoke-TestModel -Dataset $dataset -Settings $settings
+            (@($model.Comparisons.Items | Where-Object AgreementChange | ForEach-Object { "$($_.FromMonth) to $($_.ToMonth)" }) -join ', ') | Should -Be '2026-06 to 2026-07, 2026-07 to 2026-08'
+            $reviews = @($model.Reviews | Where-Object Category -EQ 'AgreementChange')
+            $reviews.Count | Should -Be 2
+            foreach ($review in $reviews) {
+                $review.Required | Should -BeTrue
+                $review.Decision | Should -Be 'Pending'
+                $review.Detail | Should -Match 'EA and MCA prices can differ'
+            }
+            @($model.Comparisons.Items | Where-Object { $_.AgreementChange -and $_.Retained }).Count | Should -Be 2 -Because 'a pending review leaves the change in growth, so the numbers move only after a decision'
+
+            $excluded = Invoke-TestModel -Dataset $dataset -Settings $settings -Reviews (New-ReviewRecord $reviews[0] 'Exclude')
+            @($excluded.Comparisons.Items | Where-Object ToMonth -EQ '2026-07')[0].Retained | Should -BeFalse
+            $excluded.Growth.Retained | Should -Be 10
+
+            $settings.method.reviewAgreementChange = $false
+            $off = Invoke-TestModel -Dataset $dataset -Settings $settings
+            @($off.Reviews | Where-Object Category -EQ 'AgreementChange').Count | Should -Be 0
+            $off.Projection.TotalCentral | Should -Be $model.Projection.TotalCentral
+        }
+
         It 'Orders months by date key, not by the order rows arrive in' {
             $rates = [decimal[]](1000, 1100, 1050, 1200, 1180, 1250, 1300, 1280, 1350, 1400, 1390, 1450)
             $ordered = New-TestDataset -Values (New-RateSeries $rates)
@@ -79,7 +109,7 @@ Describe 'Forecast engine' {
             @($reviewed.Comparisons.Items | Where-Object Status -EQ 'Undefined')[0].Review.Decision | Should -Be 'Exclude'
         }
 
-        It 'Flags a sustained jump and suggests a step change that keeps genuine growth' {
+        It 'Flags a sustained jump, suggests a step change, and leaves it out of growth unless retained' {
             $rates = [decimal[]](1000, 1010, 1020, 1030, 1040, 1600, 1616, 1632, 1648, 1664, 1680, 1696)
             $dataset = New-TestDataset -Values (New-RateSeries $rates)
             $model = Invoke-TestModel -Dataset $dataset -Settings (New-TestSettings)
@@ -89,9 +119,63 @@ Describe 'Forecast engine' {
             $flagged[0].Suggestion | Should -Be 'StepChange'
             $flagged[0].Retained | Should -BeFalse
 
-            $reviewed = Invoke-TestModel -Dataset $dataset -Settings (New-TestSettings) -Reviews (New-ReviewRecord $flagged[0].Review 'StepChange')
-            @($reviewed.Comparisons.Items | Where-Object Flagged)[0].Retained | Should -BeTrue
-            $reviewed.Growth.Retained | Should -Be 11
+            # A step change is a one-time move to a new level that the baseline already reflects.
+            $stepped = Invoke-TestModel -Dataset $dataset -Settings (New-TestSettings) -Reviews (New-ReviewRecord $flagged[0].Review 'StepChange')
+            @($stepped.Comparisons.Items | Where-Object Flagged)[0].Retained | Should -BeFalse
+            @($stepped.Comparisons.Items | Where-Object Flagged)[0].Reason | Should -Match 'left out of growth'
+            $stepped.Growth.Retained | Should -Be 10
+            $kept = Invoke-TestModel -Dataset $dataset -Settings (New-TestSettings) -Reviews (New-ReviewRecord $flagged[0].Review 'Retain')
+            @($kept.Comparisons.Items | Where-Object Flagged)[0].Retained | Should -BeTrue
+            $kept.Growth.Retained | Should -Be 11
+        }
+
+        It 'Uses the lowest to highest change while the lookback is under 12 months, and P25 to P75 from 12' {
+            $comparisons = [pscustomobject]@{ Items = @(0.01, 0.04, 0.02 | ForEach-Object { [pscustomobject]@{ Retained = $true; Change = [decimal]$_ } }) }
+            $short = New-TestSettings
+            $short.period.lookbackMonths = 4
+            InModuleScope FinOpsForecast -Parameters @{ Comparisons = $comparisons; Short = $short; Full = (New-TestSettings) } {
+                $growth = Get-ForecastGrowth -Comparisons $Comparisons -Settings $Short
+                $growth.RangeMethod | Should -Be 'LowestToHighest'
+                $growth.Central | Should -Be 0.02
+                @($growth.Low, $growth.High) | Should -Be @(0.01, 0.04)
+                # Linear interpolation between ranks, like Excel PERCENTILE.INC.
+                $growth = Get-ForecastGrowth -Comparisons $Comparisons -Settings $Full
+                $growth.RangeMethod | Should -Be 'Percentile'
+                @($growth.Low, $growth.High) | Should -Be @(0.015, 0.03)
+            }
+        }
+
+        It 'Lets a change that isn''t flagged be reviewed by hand, even with only two changes' {
+            # Run rates 1000, 500, and 510: two changes can't be flagged, but the drop is new commitments covering usage.
+            $settings = New-TestSettings
+            $settings.period.lookbackMonths = 3
+            $settings.method.minimumRetained = 1
+            $dataset = New-TestDataset -Values (New-RateSeries -Rates ([decimal[]](1000, 500, 510)) -Months (Get-TestMonthKeys -Last '2026-10' -Count 3))
+            $model = Invoke-TestModel -Dataset $dataset -Settings $settings
+            @($model.Comparisons.Items | Where-Object Flagged).Count | Should -Be 0
+            $model.Growth.Central | Should -Be (-0.24)
+            $drop = InModuleScope FinOpsForecast -Parameters @{ Change = $model.Comparisons.Items[0]; ScopeKey = $model.ScopeKey } { New-ForecastComparisonReview -Comparison $Change -ScopeKey $ScopeKey }
+            $reviews = New-ReviewRecord $drop 'StepChange'
+            $stepped = Invoke-TestModel -Dataset $dataset -Settings $settings -Reviews $reviews
+            $stepped.Comparisons.Items[0].Retained | Should -BeFalse
+            $stepped.Comparisons.Items[0].Reason | Should -Match 'left out of growth'
+            $stepped.Growth.Central | Should -Be 0.02
+            @($stepped.Reviews | Where-Object { $_.Category -eq 'Comparison' -and $_.Decision -eq 'StepChange' }).Count | Should -Be 1
+            $stepped.Baseline.Review | Should -BeNullOrEmpty
+            $disclosure = InModuleScope FinOpsForecast -Parameters @{ Model = $stepped; Dataset = $dataset; Settings = $settings; AsOf = $script:AsOf } {
+                $readiness = Test-ForecastReadiness -Dataset $Dataset -Model $Model -Settings $Settings -AsOf $AsOf
+                (Get-ForecastDisclosure -Model $Model -Dataset $Dataset -Settings $Settings -Readiness $readiness) -join "`n"
+            }
+            $disclosure | Should -Match '0 flagged, 1 reviewed by hand\.'
+            $disclosure | Should -Match '2026-08 to 2026-09: Defined, change -50\.0%, decision StepChange, retained False'
+
+            # Excluding the latest change by hand also asks for the baseline.
+            $latest = InModuleScope FinOpsForecast -Parameters @{ Change = $model.Comparisons.Items[1]; ScopeKey = $model.ScopeKey } { New-ForecastComparisonReview -Comparison $Change -ScopeKey $ScopeKey }
+            $reviews += New-ReviewRecord $latest 'Exclude'
+            $excluded = Invoke-TestModel -Dataset $dataset -Settings $settings -Reviews $reviews
+            $excluded.Comparisons.Items[1].Retained | Should -BeFalse
+            $excluded.Baseline.Review.Suggested | Should -Be 'MedianLast3'
+            $excluded.Baseline.Pending | Should -BeTrue
         }
 
         It 'Suggests excluding a one-month spike and keeps the month in actuals' {
@@ -159,6 +243,24 @@ Describe 'Forecast engine' {
             $model.Baseline.Pending | Should -BeFalse
             # The synthetic rate-to-cost conversion divides by 30, so compare at eight decimals.
             [decimal]::Round($model.Baseline.Value, 8) | Should -Be ([decimal]$Expected)
+        }
+
+        It 'Suggests the latest month after a step change into it, and asks again if the baseline was answered first' {
+            $rates = [decimal[]](@(1..11 | ForEach-Object { 1000 }) + 500)
+            $dataset = New-TestDataset -Values (New-RateSeries $rates)
+            $model = Invoke-TestModel -Dataset $dataset -Settings (New-TestSettings)
+            $model.Baseline.Review.Suggested | Should -Be 'MedianLast3'
+            # Exceptions lists the baseline review before the change it depends on.
+            $reviews = New-ReviewRecord $model.Baseline.Review 'MedianLast3'
+            $reviews += New-ReviewRecord @($model.Comparisons.Items)[-1].Review 'StepChange'
+            $stepped = Invoke-TestModel -Dataset $dataset -Settings (New-TestSettings) -Reviews $reviews
+            $stepped.Baseline.Review.Suggested | Should -Be 'LatestMonth'
+            $stepped.Baseline.Review.Stale | Should -BeTrue
+            $stepped.Baseline.Pending | Should -BeTrue
+            $reviews[$stepped.Baseline.Review.Key] = [pscustomobject]@{ decision = 'LatestMonth'; fingerprint = $stepped.Baseline.Review.Fingerprint; note = 'synthetic review'; value = $null }
+            $answered = Invoke-TestModel -Dataset $dataset -Settings (New-TestSettings) -Reviews $reviews
+            $answered.Baseline.Pending | Should -BeFalse
+            [decimal]::Round($answered.Baseline.Value, 8) | Should -Be 500
         }
     }
 

@@ -60,6 +60,16 @@ function Merge-ForecastExportHistory {
     foreach ($result in ($Results | Sort-Object { if ($_.Submitted) { [datetime]$_.Submitted } else { [datetime]::MinValue } })) {
         foreach ($entry in $result.SubscriptionNames.GetEnumerator()) { $names[$entry.Key] = $entry.Value }
     }
+    # A run group at one subscription reads better by the subscription's name.
+    $describeGroup = {
+        param($Selected)
+        if (-not $Selected) { return 'an unknown source' }
+        if ([string]$Selected.Scope -match '^/subscriptions/(?<id>[0-9a-fA-F-]{36})/?$') {
+            $id = ConvertTo-ForecastSubscriptionId -Value $Matches.id
+            if ($id -and $names[$id]) { return "$(ConvertTo-ForecastSafeText ([string]$names[$id]) 60) ($id)" }
+        }
+        return ConvertTo-ForecastSafeText ([string]$Selected.Label) 160
+    }
 
     # Gather the selected cells with their group context, indexing each run's
     # cells by month once instead of scanning them per selection.
@@ -160,6 +170,11 @@ function Merge-ForecastExportHistory {
     $unknownTypes = @{}
     $entriesByRunMonth = @{}
     $agreementsByMonth = @{}
+    # Agreements whose charges count in each month, so a change between
+    # months on different agreements can be reviewed.
+    $includedAgreements = @{}
+    # Marketplace charges in scope, counted or not, for their own report view.
+    $marketplace = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     foreach ($entry in $entries) {
         $cell = $entry.Cell
         $month = [string]$cell.Month
@@ -188,8 +203,22 @@ function Merge-ForecastExportHistory {
         elseif ($publisher -eq 'Marketplace' -and -not $includeMarketplace) { 'Marketplace' }
         else { 'Included' }
         $entry.Disposition = $disposition
+        if ($publisher -eq 'Marketplace' -and $disposition -in 'Included', 'Marketplace') {
+            # Currency is part of the key, so amounts in different currencies are never added together.
+            $marketKey = "$month|$($cell.SubscriptionId)|$($cell.ChargeType)|$($cell.Stream)|$($cell.PublisherName)|$disposition|$($cell.Currency)"
+            if (-not $marketplace.ContainsKey($marketKey)) {
+                $marketplace[$marketKey] = [pscustomobject]@{
+                    Month = $month; SubscriptionId = [string]$cell.SubscriptionId; ChargeType = [string]$cell.ChargeType; Stream = [string]$cell.Stream
+                    PublisherName = [string]$cell.PublisherName; Counted = ($disposition -eq 'Included'); Cost = 0d; Rows = 0L; Currency = [string]$cell.Currency
+                }
+            }
+            $marketplace[$marketKey].Cost += $cost
+            $marketplace[$marketKey].Rows += [long]$cell.Rows
+        }
         switch ($disposition) {
             'Included' {
+                if (-not $includedAgreements.ContainsKey($month)) { $includedAgreements[$month] = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal) }
+                if ($cell.Agreement) { [void]$includedAgreements[$month].Add([string]$cell.Agreement) }
                 switch ($cell.Stream) {
                     'RunRate' { $totals.RunRate += $cost }
                     'Purchase' { $totals.Purchase += $cost }
@@ -269,8 +298,16 @@ function Merge-ForecastExportHistory {
         }
         $final = @($selectedRuns | Where-Object { -not $_.Final }).Count -eq 0
         $status = if ($notes.Count) { 'Incomplete' } elseif ($final) { 'Complete' } else { 'Provisional' }
+        # A whole month read before the grace period ended can still change.
+        if ($status -eq 'Provisional' -and @($selectedRuns | Where-Object { -not $_.Final -and $_.Coverage -in 'Full', 'Unknown' }).Count) {
+            $notes.Add("Read less than $([int]$Settings.period.graceDays) days after the month ended, before it counted as final.")
+        }
         if ($totals.Currencies.Count -gt 1) { $notes.Add("Multiple billing currencies: $(@($totals.Currencies) -join ', ').") }
         $through = $null; $observedThrough = $null
+        # The earliest and latest charge across the month's runs, and where
+        # they are. Runs read before first charge dates were recorded can't
+        # show a late start, so the check then stays quiet.
+        $observedFrom = $null; $fromKnown = $true; $latestGroup = $null; $earliestGroup = $null
         $coverageDates = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
         $monthStart = Get-ForecastMonthStart -MonthKey $month
         $lastDay = (Get-ForecastMonthEnd -MonthKey $month).AddDays(-1)
@@ -278,7 +315,13 @@ function Merge-ForecastExportHistory {
             $runResult = $byRun[[string]$selected.RunKey]
             $stat = @($runResult.MonthStats | Where-Object Month -EQ $month)[0]
             $runThrough = if ($stat -and $stat.Through) { [datetime]$stat.Through } else { $null }
-            if ($runThrough -and ($null -eq $observedThrough -or $runThrough -lt $observedThrough)) { $observedThrough = $runThrough }
+            # The month's data reaches as far as its latest charge in any run. A quiet
+            # subscription, or one billed only for a purchase, stops earlier on its own.
+            if ($runThrough -and ($null -eq $observedThrough -or $runThrough -gt $observedThrough)) { $observedThrough = $runThrough; $latestGroup = $selected }
+            if ($stat -and [long]$stat.Rows -gt 0) {
+                if (-not $stat.From) { $fromKnown = $false }
+                elseif ($null -eq $observedFrom -or [datetime]$stat.From -lt $observedFrom) { $observedFrom = [datetime]$stat.From; $earliestGroup = $selected }
+            }
             if ($runResult.HasManifest -and $runResult.Start -and $runResult.End) {
                 $coveredEnd = Get-ForecastRunLastDate -Start $runResult.Start -End $runResult.End
                 if ($coveredEnd -gt $lastDay) { $coveredEnd = $lastDay }
@@ -323,10 +366,20 @@ function Merge-ForecastExportHistory {
         }
         if ($status -eq 'Complete' -and $observedThrough -and $observedThrough.Date -lt $lastDay) {
             $gap = [int]($lastDay - $observedThrough.Date).TotalDays
-            $notes.Add("Last charge is dated $gap day(s) before month end.")
-            $issues.Add((New-ForecastIssue -Code 'RUN-EARLYEND' -Severity 'Warn' -Message "$month is final, but its last charge is dated $($observedThrough.ToString('yyyy-MM-dd', $script:ForecastInvariant)), $gap day(s) before month end. Check the export covers the whole month." -Subject $month))
+            $date = $observedThrough.ToString('yyyy-MM-dd', $script:ForecastInvariant)
+            $where = & $describeGroup $latestGroup
+            $notes.Add("The latest charge in any source is on $date, in $where, $gap day(s) before month end.")
+            $issues.Add((New-ForecastIssue -Code 'RUN-EARLYEND' -Severity 'Warn' -Message "$month is final, but no source has a charge after $date, $gap day(s) before month end; the latest is in $where. Check the data covers the whole month." -Subject $month))
+        }
+        if ($status -eq 'Complete' -and $fromKnown -and $observedFrom -and $observedFrom.Date -gt $monthStart) {
+            $late = [int]($observedFrom.Date - $monthStart).TotalDays
+            $date = $observedFrom.ToString('yyyy-MM-dd', $script:ForecastInvariant)
+            $where = & $describeGroup $earliestGroup
+            $notes.Add("The earliest charge in any source is on $date, in $where, $late day(s) after the month starts.")
+            $issues.Add((New-ForecastIssue -Code 'RUN-LATESTART' -Severity 'Warn' -Message "$month is final, but no source has a charge before $date, $late day(s) after the month starts; the earliest is in $where. If a billing agreement started that day, such as a move from EA to MCA, the days before it were billed under the earlier agreement: add that agreement's data and set the migration boundary, or $month counts only part of its cost." -Subject $month))
         }
         $runRate = $totals.RunRate
+        $monthAgreements = if ($includedAgreements.ContainsKey($month)) { @($includedAgreements[$month]) } else { @() }
         $rows.Add([pscustomobject]@{
                 Month = $month; Status = $status; Days = Get-ForecastDaysInMonth -MonthKey $month
                 RunRate = $runRate; Purchase = $totals.Purchase; Adjustment = $totals.Adjustment; Other = $totals.Other
@@ -334,7 +387,8 @@ function Merge-ForecastExportHistory {
                 ExcludedMarketplace = $totals.Marketplace; ExcludedTax = $totals.Tax; ExcludedUnattributed = $totals.Unattributed
                 ExcludedBoundary = $totals.Boundary; ExcludedScope = $totals.Scope; ExcludedOverlap = $totals.Overlap
                 DataThrough = $through; Provenance = @($selectedRuns | ForEach-Object { "$($_.Label): run $($_.RunId)$(if ($_.Final) { '' } else { ' (not final)' })" })
-                Approved = $true; Note = ($notes -join ' ')
+                Approved = $true; Note = ($notes -join ' '); Agreements = $monthAgreements
+                FirstCharge = if ($fromKnown -and $observedFrom) { $observedFrom.Date } else { $null }
             })
     }
     if ($currencies.Count -gt 1) { $issues.Add((New-ForecastIssue -Code 'CUR-MIXED' -Message "The history mixes billing currencies ($(@($currencies) -join ', ')). Amounts in different currencies can't be added together; scope the forecast to one currency.")) }
@@ -351,21 +405,49 @@ function Merge-ForecastExportHistory {
     $commitments = @{}
     foreach ($cell in $included) {
         if ($cell.Stream -ne 'Purchase' -or -not $cell.CommitmentId -or $cell.ChargeType -ne 'Purchase') { continue }
-        if (-not $commitments.ContainsKey($cell.CommitmentId)) { $commitments[$cell.CommitmentId] = [pscustomobject]@{ Months = [Collections.Generic.HashSet[string]]::new(); Recurring = $false; Last = 0d } }
+        if (-not $commitments.ContainsKey($cell.CommitmentId)) { $commitments[$cell.CommitmentId] = [pscustomobject]@{ Months = [Collections.Generic.HashSet[string]]::new(); Recurring = $false; Last = 0d; Payers = @{} } }
         [void]$commitments[$cell.CommitmentId].Months.Add($cell.Month)
         if ($cell.Frequency -match '^(?i)recurring$') { $commitments[$cell.CommitmentId].Recurring = $true }
-        if ($cell.Month -eq $completeMonths[-1]) { $commitments[$cell.CommitmentId].Last += [decimal]$cell.Cost }
+        if ($cell.Month -eq $completeMonths[-1]) {
+            $commitments[$cell.CommitmentId].Last += [decimal]$cell.Cost
+            $payer = [string]$cell.SubscriptionId
+            if (-not $commitments[$cell.CommitmentId].Payers.ContainsKey($payer)) { $commitments[$cell.CommitmentId].Payers[$payer] = 0d }
+            $commitments[$cell.CommitmentId].Payers[$payer] += [decimal]$cell.Cost
+        }
     }
     $scheduledText = (@($Settings.scheduledItems | ForEach-Object { "$($_.id) $($_.commitmentId) $($_.description)" }) -join ' ').ToLowerInvariant()
+    $takenIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($item in @($Settings.scheduledItems)) { [void]$takenIds.Add([string]$item.id) }
     $recurring = [Collections.Generic.List[object]]::new()
-    foreach ($entry in $commitments.GetEnumerator()) {
+    foreach ($entry in ($commitments.GetEnumerator() | Sort-Object { [string]$_.Key })) {
         $inRecent = $completeMonths.Count -eq 3 -and @($completeMonths | Where-Object { $entry.Value.Months.Contains($_) }).Count -eq 3
         if (-not ($inRecent -or ($entry.Value.Recurring -and $completeMonths.Count -and $entry.Value.Months.Contains($completeMonths[-1])))) { continue }
-        $recurring.Add([pscustomobject]@{ CommitmentId = $entry.Key; LastAmount = $entry.Value.Last; Months = @($entry.Value.Months | Sort-Object) })
+        # The subscription billed the most for it in the latest complete month pays for it.
+        $payerId = @($entry.Value.Payers.GetEnumerator() | Sort-Object @{ Expression = { [decimal]$_.Value }; Descending = $true }, @{ Expression = { [string]$_.Key } } | Select-Object -First 1 | ForEach-Object Key)[0]
+        $payerName = if ($payerId -and $names[$payerId]) { ConvertTo-ForecastSafeText ([string]$names[$payerId]) 60 } else { '' }
+        $recurring.Add([pscustomobject]@{ CommitmentId = $entry.Key; LastAmount = $entry.Value.Last; Months = @($entry.Value.Months | Sort-Object); SubscriptionId = [string]$payerId; SubscriptionName = $payerName })
         if ($scheduledText.Contains($entry.Key) -or @($Settings.scheduledItems | Where-Object { Test-ForecastCommitmentMatch -Scheduled ([string]$_.commitmentId) -Posted $entry.Key }).Count) { continue }
-        $reviewItems.Add((New-ForecastReviewItem -Key "recurring:${scopeKey}:$($entry.Key)" -Fingerprint (Get-ForecastHash -Text $entry.Key) -Category 'RecurringPurchase' -Reviews $Reviews -Subject $entry.Key `
-                    -Title "Recurring purchase without a scheduled item" -Detail "Commitment $($entry.Key) was billed $(Format-ForecastAmount $entry.Value.Last) in $($completeMonths[-1]) and recurs. Purchases aren't grown with the run rate, so add a scheduled item (include the commitment ID) or confirm it won't recur." `
-                    -Options @('Scheduled', 'NotRecurring') -Suggested 'Scheduled'))
+        $paidBy = if ($payerName) { " by $payerName" } elseif ($payerId) { " by subscription $payerId" } else { '' }
+        $proposal = $null
+        if ($entry.Value.Last -gt 0) {
+            # A short, unique ID from the commitment's GUID, or a hash of it.
+            $guid = [regex]::Match([string]$entry.Key, '[0-9a-fA-F]{8}(?=-[0-9a-fA-F]{4}-)')
+            $stem = 'recurring-' + $(if ($guid.Success) { $guid.Value.ToLowerInvariant() } else { Get-ForecastHash -Text ([string]$entry.Key) -Length 8 })
+            $id = $stem; $suffix = 2
+            while ($takenIds.Contains($id)) { $id = "$stem-$suffix"; $suffix++ }
+            [void]$takenIds.Add($id)
+            $proposal = [pscustomobject]@{
+                id = $id; type = 'Purchase'; description = "Recurring purchase$(if ($paidBy) { ", paid$paidBy" })"
+                startMonth = Add-ForecastMonth -MonthKey $completeMonths[-1] -Count 1; endMonth = ''; recurrence = 'Monthly'
+                amount = Format-ForecastDecimal $entry.Value.Last; baselineTreatment = 'Additive'; replacedAmount = ''; commitmentId = [string]$entry.Key
+            }
+        }
+        $proposalText = if ($proposal) { " Proposed scheduled item: $(Format-ForecastAmount $entry.Value.Last) a month from $($proposal.startMonth), with no end month, for this commitment. Press A on this review in 5 Exceptions to add it; then set an end month in 4 Assumptions if the commitment ends sooner." } else { '' }
+        $review = New-ForecastReviewItem -Key "recurring:${scopeKey}:$($entry.Key)" -Fingerprint (Get-ForecastHash -Text $entry.Key) -Category 'RecurringPurchase' -Reviews $Reviews -Subject $entry.Key `
+            -Title "Recurring purchase without a scheduled item" -Detail "Commitment $($entry.Key) was billed $(Format-ForecastAmount $entry.Value.Last) in $($completeMonths[-1])$paidBy and recurs. Purchases aren't grown with the run rate, so add a scheduled item (include the commitment ID) or confirm it won't recur.$proposalText" `
+            -Options @('Scheduled', 'NotRecurring') -Suggested 'Scheduled'
+        $review | Add-Member -NotePropertyName Proposal -NotePropertyValue $proposal
+        $reviewItems.Add($review)
     }
 
     $population = @{}
@@ -375,11 +457,12 @@ function Merge-ForecastExportHistory {
         [void]$population[$cell.SubscriptionId].Add($cell.Month)
     }
     $latestThrough = @($rows | Where-Object DataThrough | ForEach-Object { [datetime]$_.DataThrough } | Sort-Object)[-1]
+    $marketplaceRows = @($marketplace.Values | Sort-Object Month, SubscriptionId, ChargeType, PublisherName, Currency, @{ Expression = { -not $_.Counted } })
     [pscustomobject]@{
         Mode = 'Exports'; Currency = if ($currencies.Count -eq 1) { @($currencies)[0] } elseif ($currencies.Count -gt 1) { 'Mixed' } else { '' }
         Months = $rows.ToArray(); Cells = $included.ToArray(); Reviews = $reviewItems.ToArray(); Issues = $issues.ToArray()
         Reconciliation = $reconciliation.ToArray(); Runs = @($Selection.Selection); SubscriptionNames = $names
         RecurringPurchases = $recurring.ToArray(); Population = $population; ScopeSubscriptions = @($scopeSubscriptions)
-        DataThrough = $latestThrough
+        DataThrough = $latestThrough; Marketplace = $marketplaceRows
     }
 }
